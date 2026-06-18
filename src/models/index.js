@@ -1,5 +1,25 @@
 const mongoose = require('mongoose');
 const { Schema, model, models } = mongoose;
+
+// Compatibility IDs keep the existing Flutter/Admin clients working while MongoDB
+// remains the source of truth. New top-level documents receive a numeric legacyId.
+mongoose.plugin((schema) => {
+  if (schema.options.timestamps !== true) return;
+  schema.add({ legacyId: { type: Number, index: true, sparse: true } });
+  schema.pre('save', async function assignLegacyId(next) {
+    try {
+      if (!this.constructor?.modelName || this.legacyId != null) return next();
+      const key = `legacy:${this.constructor.collection.collectionName}`;
+      const result = await mongoose.connection.collection('_counters').findOneAndUpdate(
+        { _id: key },
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: 'after' }
+      );
+      this.legacyId = result.value?.seq ?? result.seq;
+      next();
+    } catch (error) { next(error); }
+  });
+});
 const objectId = (ref, required=false) => ({ type: Schema.Types.ObjectId, ref, required, index: true });
 const money = { type: Number, min: 0, default: 0 };
 const imageSchema = new Schema({ url:String, publicId:String, alt:String }, { _id:false });

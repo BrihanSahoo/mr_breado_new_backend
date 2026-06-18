@@ -43,3 +43,13 @@ External verification required:
 - Public settings expose current online-payment and takeaway availability.
 - Added complete Render environment-variable guide.
 - Added comma-separated production CORS origin support for Express and Socket.IO.
+
+## Customer App Alignment v5
+
+- Added customer compatibility router before public/payment/order legacy routers.
+- Added stable numeric API compatibility IDs backed by MongoDB `legacyId` values.
+- Added automatic backfill for existing MongoDB documents.
+- Added embedded cart/address numeric ID compatibility.
+- Connected nearest outlet, outlet-only menu, cart, addresses, checkout, COD, Razorpay, takeaway, orders, invoices, reviews, notifications and live rider tracking.
+- Added 3 customer compatibility regression tests.
+- Syntax checks passed; 13 tests passed.
