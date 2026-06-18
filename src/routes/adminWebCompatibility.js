@@ -43,6 +43,12 @@ const normalizeOutlet = (o) => o ? ({
   longitude: o.location?.coordinates?.[0] ?? 0,
   addressText: [o.address?.line1,o.address?.area,o.address?.city,o.address?.state,o.address?.pincode].filter(Boolean).join(', '),
 }) : null;
+const normalizeCategory = (c) => {
+  if (!c) return null;
+  const raw = typeof c.toObject === 'function' ? c.toObject() : c;
+  const url = typeof raw.image === 'string' ? raw.image : (raw.image?.url || '');
+  return { ...raw, id: String(raw._id), title: raw.name, image: url, imageUrl: url, icon: url, status: raw.active ? 'ACTIVE' : 'INACTIVE', enabled: Boolean(raw.active) };
+};
 const normalizeProduct = (p) => p ? ({
   ...p,
   id: String(p._id), productId: String(p._id), title: p.name,
@@ -87,7 +93,7 @@ async function primaryOutletHandler(req,res){
   const outlet=await Outlet.findOne({primary:true}).lean() || await Outlet.findOne({active:true}).sort({createdAt:1}).lean();
   return ok(res,normalizeOutlet(outlet),'Primary outlet fetched');
 }
-r.get(['/admin/mr-breado/restaurant','/admin/mr-breado/store','/admin/primary-outlet'],ah(primaryOutletHandler));
+r.get(['/admin/mr-breado/restaurant','/admin/mr-breado/store','/admin/primary-outlet','/admin/outlets/primary'],ah(primaryOutletHandler));
 
 async function resolveCategory(body){
   let category=null;
@@ -117,7 +123,7 @@ r.get('/admin/dashboard/user-growth', ah(async(req,res)=>ok(res,await User.aggre
 r.get('/admin/dashboard/order-status-chart', ah(async(req,res)=>ok(res,await Order.aggregate([{$group:{_id:'$status',count:{$sum:1}}}]))));
 
 r.get('/admin/category-summary', ah(async(req,res)=>{const [total,active,sub]=await Promise.all([Category.countDocuments(),Category.countDocuments({active:true}),Category.countDocuments({parentId:{$ne:null}})]);ok(res,{totalCategories:total,activeCategories:active,inactiveCategories:total-active,totalSubCategories:sub})}));
-r.get(['/admin/food-categories','/admin/sub-categories'], ah(async(req,res)=>{const q=req.path.includes('sub-categories')?{parentId:{$ne:null}}:{};ok(res,await Category.find(q).sort({sortOrder:1,name:1}).lean())}));
+r.get(['/admin/food-categories','/admin/sub-categories'], ah(async(req,res)=>{const q=req.path.includes('sub-categories')?{parentId:{$ne:null}}:{};ok(res,(await Category.find(q).sort({sortOrder:1,name:1}).lean()).map(normalizeCategory))}));
 
 r.get('/admin/products/:id', ah(async(req,res)=>ok(res,normalizeProduct(await Product.findById(req.params.id).populate('categoryId brandId').lean()))));
 r.patch(['/admin/products/:id/stock','/admin/products/:id/availability'], ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:req.body.isAvailable??req.body.available??req.body.active??true}},{new:true}).populate('categoryId').lean()))));
