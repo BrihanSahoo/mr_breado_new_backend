@@ -8,7 +8,7 @@ const {AppError}=require('../utils/errors');
 const transitions={PENDING_PAYMENT:['RECEIVED','PAYMENT_FAILED','CANCELLED'],RECEIVED:['ACCEPTED','REJECTED','CANCELLED'],ACCEPTED:['PREPARING','CANCELLED'],PREPARING:['READY','CANCELLED'],READY:['RIDER_ASSIGNMENT_PENDING','RIDER_ASSIGNED','PICKED_UP','DELIVERED','CANCELLED'],RIDER_ASSIGNMENT_PENDING:['RIDER_ASSIGNED','CANCELLED'],RIDER_ASSIGNED:['PICKED_UP','CANCELLED'],PICKED_UP:['DELIVERED'],REJECTED:[],CANCELLED:[],DELIVERED:[],REFUND_PENDING:['REFUNDED'],PAYMENT_FAILED:[]};
 const aliases={PLACED:'RECEIVED',CONFIRMED:'ACCEPTED',PREPARED:'READY',OUT_FOR_DELIVERY:'PICKED_UP',COMPLETED:'DELIVERED'};
 const canonical=s=>aliases[String(s||'').toUpperCase()]||String(s||'').toUpperCase();
-const imageUrl=v=>{if(!v)return'';if(typeof v==='string')return v;if(Array.isArray(v))return imageUrl(v[0]);return imageUrl(v.secure_url||v.secureUrl||v.url||v.src||v.path||v.image||v.imageUrl);};
+const imageUrl=v=>{if(!v)return'';if(typeof v==='string'){let u=v.trim();if(u.startsWith('//'))u=`https:${u}`;if(u.startsWith('http://res.cloudinary.com/'))u=u.replace('http://','https://');if(u.includes('res.cloudinary.com/')&&u.includes('/upload/')){u=u.replace(/f_auto/g,'f_jpg');if(!u.includes('/upload/f_jpg')&&!u.includes('/upload/q_auto,f_jpg'))u=u.replace('/upload/','/upload/q_auto,f_jpg/');}return u;}if(Array.isArray(v))return imageUrl(v[0]);return imageUrl(v.secure_url||v.secureUrl||v.url||v.src||v.path||v.image||v.imageUrl);};
 function couponDiscount(coupon,subtotal){
   if(!coupon)return 0;
   const type=String(coupon.type||'PERCENT').toUpperCase();
@@ -65,11 +65,18 @@ async function buildPricing({outletId,items,address,fulfilmentType='DELIVERY',co
   const tax=Number((subtotal*Number(taxSettings?.rate||0)/100).toFixed(2));
   let distanceKm=0,delCharge=0;
   if(type==='DELIVERY'){
-    if(address?.latitude==null||address?.longitude==null)throw new AppError('Delivery coordinates required',400,'DELIVERY_COORDINATES_REQUIRED');
-    const stored=deliveryService.storedOutletCoordinates(outlet);
-    const customer=deliveryService.coordinatePair(address.latitude,address.longitude);
-    distanceKm=Number(haversineKm(stored.latitude,stored.longitude,customer.latitude,customer.longitude).toFixed(2));
-    if(distanceKm>outlet.deliveryRadiusKm)throw new AppError('Address is outside outlet delivery radius',409,'OUT_OF_RANGE');
+    if(!address)throw new AppError('Delivery address is required',400,'DELIVERY_ADDRESS_REQUIRED');
+    const validation=await deliveryService.checkServiceability({
+      outletId,
+      latitude:address.latitude,
+      longitude:address.longitude,
+      pincode:address.pincode||address.zipcode,
+      address:address.line1||address.address,
+      city:address.city,
+      state:address.state
+    });
+    if(!validation.serviceable)throw new AppError(validation.message||'Address is outside outlet delivery area',409,'OUT_OF_RANGE');
+    distanceKm=Number(validation.distanceKm||0);
     const ds=outlet.deliverySettings||await settings.get('delivery')||await settings.get('delivery_settings');
     delCharge=deliveryCharge(distanceKm,ds);
   }
