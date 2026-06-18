@@ -91,6 +91,22 @@ const Invoice = models.Invoice || model('Invoice', new Schema({orderId:{type:Sch
 const Setting = models.Setting || model('Setting', new Schema({key:{type:String,required:true,unique:true,index:true},value:Schema.Types.Mixed,encryptedValue:String,encryptionIv:String,encryptionTag:String,isSecret:{type:Boolean,default:false,index:true},public:{type:Boolean,default:false},active:{type:Boolean,default:true,index:true},version:{type:Number,default:1},lastValidatedAt:Date,updatedBy:objectId('User')},{timestamps:true}));
 const SettingAudit = models.SettingAudit || model('SettingAudit', new Schema({settingKey:{type:String,required:true,index:true},action:{type:String,required:true},changedBy:objectId('User'),previousMasked:Schema.Types.Mixed,nextMasked:Schema.Types.Mixed,requestId:String},{timestamps:true}));
 const Notification = models.Notification || model('Notification', new Schema({userId:objectId('User'),outletId:objectId('Outlet'),role:String,title:String,message:String,type:String,data:Schema.Types.Mixed,read:{type:Boolean,default:false,index:true}},{timestamps:true}));
+
+const BiteStory = models.BiteStory || model('BiteStory', new Schema({
+  title:{type:String,required:true,trim:true},
+  subtitle:{type:String,default:''},
+  description:{type:String,default:''},
+  media:imageSchema,
+  mediaType:{type:String,enum:['IMAGE','VIDEO'],default:'IMAGE'},
+  actionType:{type:String,default:''},
+  actionValue:{type:String,default:''},
+  sortOrder:{type:Number,default:0,index:true},
+  active:{type:Boolean,default:true,index:true},
+  startsAt:Date,
+  endsAt:Date,
+  createdBy:objectId('User')
+},{timestamps:true}));
+
 const Banner = models.Banner || model('Banner', new Schema({title:String,subtitle:String,image:imageSchema,actionType:String,actionValue:String,active:{type:Boolean,default:true},sortOrder:Number},{timestamps:true}));
 const Offer = models.Offer || model('Offer', new Schema({title:String,code:{type:String,unique:true,sparse:true},description:String,image:imageSchema,type:String,value:Number,minOrder:Number,maxDiscount:Number,startAt:Date,endAt:Date,active:{type:Boolean,default:true},outletIds:[objectId('Outlet')],productIds:[objectId('Product')]},{timestamps:true}));
 const Coupon = models.Coupon || model('Coupon', new Schema({code:{type:String,required:true,unique:true,uppercase:true},type:String,value:Number,minOrder:Number,maxDiscount:Number,usageLimit:Number,usedCount:{type:Number,default:0},startAt:Date,endAt:Date,active:{type:Boolean,default:true}},{timestamps:true}));
@@ -100,4 +116,4 @@ const SupportTicket = models.SupportTicket || model('SupportTicket', new Schema(
 const VerificationRequest = models.VerificationRequest || model('VerificationRequest', new Schema({userId:objectId('User',true),outletId:objectId('Outlet'),type:String,status:{type:String,default:'PENDING',index:true},documents:[imageSchema],note:String,reviewedBy:objectId('User'),reviewedAt:Date},{timestamps:true}));
 const DailyClosing = models.DailyClosing || model('DailyClosing', new Schema({outletId:objectId('Outlet',true),sellerId:objectId('User',true),businessDate:{type:String,required:true},stockSnapshot:[{productId:objectId('Product'),stockQuantity:Number,reservedQuantity:Number}],onlineSales:Number,offlineSales:Number,totalSales:Number,notes:String,submittedAt:{type:Date,default:Date.now}},{timestamps:true})); DailyClosing.schema.index({outletId:1,businessDate:1},{unique:true});
 
-module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,PaymentWebhookEvent,Refund,RiderLocation,RiderCashTransaction,RiderEarning,OfflineSale,Invoice,Setting,SettingAudit,Notification,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};
+module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,PaymentWebhookEvent,Refund,RiderLocation,RiderCashTransaction,RiderEarning,OfflineSale,Invoice,Setting,SettingAudit,Notification,BiteStory,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};

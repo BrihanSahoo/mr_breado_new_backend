@@ -9,7 +9,7 @@ const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const {
   User, Outlet, Category, Brand, Product, OutletProduct, Order, OrderEvent,
-  Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice,
+  Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice, BiteStory,
 } = require('../models');
 const settings = require('../services/settingsService');
 const orderService = require('../services/orderService');
@@ -129,6 +129,42 @@ r.route('/admin/mr-breado/products/:id')
  .put(upload.single('image'),ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const body={...req.body};const uploaded=await uploadMedia(req.file,'products');if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body,existing);const p=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId brandId').lean();ok(res,normalizeProduct(p),'Product updated')}))
  .delete(ah(async(req,res)=>{await Product.findByIdAndUpdate(req.params.id,{$set:{active:false}});ok(res,null,'Product disabled')}));
 r.patch('/admin/mr-breado/products/:id/availability',ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:req.body.isAvailable??req.body.available??true}},{new:true}).populate('categoryId').lean()))));
+
+
+const normalizeStory = (story) => {
+  if (!story) return null;
+  const raw = typeof story.toObject === 'function' ? story.toObject() : story;
+  const mediaUrl = raw.media?.url || raw.mediaUrl || raw.thumbnailUrl || '';
+  return {...raw,id:String(raw._id),mediaUrl,media_url:mediaUrl,thumbnailUrl:mediaUrl,thumbnail_url:mediaUrl,image:mediaUrl,imageUrl:mediaUrl,active:raw.active!==false};
+};
+
+r.route('/admin/stories')
+ .get(ah(async(req,res)=>ok(res,(await BiteStory.find().sort({sortOrder:1,createdAt:-1}).lean()).map(normalizeStory))))
+ .post(upload.single('image'),ah(async(req,res)=>{
+   const title=String(req.body.title||'').trim();
+   if(!title) throw new AppError('Story title is required',400,'STORY_TITLE_REQUIRED');
+   const uploaded=await uploadMedia(req.file,'stories');
+   const supplied=imageUrl(req.body.mediaUrl||req.body.thumbnailUrl||req.body.imageUrl||req.body.image);
+   const media=uploaded||supplied;
+   if(!media) throw new AppError('Select a story image from your computer',400,'STORY_IMAGE_REQUIRED');
+   const story=await BiteStory.create({title,subtitle:String(req.body.subtitle||''),description:String(req.body.description||''),media,mediaType:'IMAGE',actionType:String(req.body.actionType||''),actionValue:String(req.body.actionValue||''),sortOrder:Number(req.body.sortOrder||0),active:String(req.body.active)!=='false',createdBy:req.user.id});
+   ok(res,normalizeStory(story),'Story created',201);
+ }));
+
+r.route('/admin/stories/:id')
+ .get(ah(async(req,res)=>{const story=await BiteStory.findById(req.params.id).lean();if(!story)throw new AppError('Story not found',404);ok(res,normalizeStory(story));}))
+ .put(upload.single('image'),ah(async(req,res)=>{
+   const story=await BiteStory.findById(req.params.id);if(!story)throw new AppError('Story not found',404);
+   const uploaded=await uploadMedia(req.file,'stories');
+   if(req.body.title!==undefined){const title=String(req.body.title).trim();if(!title)throw new AppError('Story title is required',400,'STORY_TITLE_REQUIRED');story.title=title;}
+   for(const k of ['subtitle','description','actionType','actionValue']) if(req.body[k]!==undefined) story[k]=String(req.body[k]||'');
+   if(req.body.sortOrder!==undefined) story.sortOrder=Number(req.body.sortOrder||0);
+   if(req.body.active!==undefined) story.active=String(req.body.active)!=='false';
+   if(uploaded) story.media=uploaded; else {const supplied=imageUrl(req.body.mediaUrl||req.body.thumbnailUrl||req.body.imageUrl||req.body.image);if(supplied)story.media=supplied;}
+   await story.save();ok(res,normalizeStory(story),'Story updated');
+ }))
+ .delete(ah(async(req,res)=>{const story=await BiteStory.findByIdAndDelete(req.params.id);if(!story)throw new AppError('Story not found',404);if(story.media?.publicId){cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});await cloudinary.uploader.destroy(story.media.publicId).catch(()=>{});}ok(res,null,'Story deleted');}));
+r.patch('/admin/stories/:id/status',ah(async(req,res)=>{const active=String(req.body.active??req.body.enabled??true)!=='false';const story=await BiteStory.findByIdAndUpdate(req.params.id,{$set:{active}},{new:true,runValidators:true}).lean();if(!story)throw new AppError('Story not found',404);ok(res,normalizeStory(story),'Story status updated');}));
 
 r.route('/admin/brands')
  .get(ah(async(req,res)=>ok(res,(await Brand.find().sort({name:1}).lean()).map(b=>({...b,id:String(b._id),image:b.image?.url||'',imageUrl:b.image?.url||''})))))
