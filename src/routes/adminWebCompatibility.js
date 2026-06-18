@@ -8,7 +8,7 @@ const { ok } = require('../utils/respond');
 const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const {
-  User, Outlet, Category, Product, OutletProduct, Order, OrderEvent,
+  User, Outlet, Category, Brand, Product, OutletProduct, Order, OrderEvent,
   Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice,
 } = require('../models');
 const settings = require('../services/settingsService');
@@ -19,12 +19,12 @@ const deliveryService = require('../services/deliveryService');
 
 const r = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (_req,file,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) });
-async function uploadProductImage(file){
+async function uploadMedia(file, folder='products'){
   if(!file) return null;
   if(!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) throw new AppError('Cloudinary configuration is required for image upload',503,'IMAGE_STORAGE_NOT_CONFIGURED');
   cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});
   const data=`data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
-  const result=await cloudinary.uploader.upload(data,{folder:'mr-breado/products',resource_type:'image'});
+  const result=await cloudinary.uploader.upload(data,{folder:`mr-breado/${folder}`,resource_type:'image'});
   return {url:result.secure_url,publicId:result.public_id,alt:file.originalname};
 }
 r.use('/admin', requireAuth, allowRoles('ADMIN'));
@@ -55,7 +55,7 @@ const normalizeProduct = (p) => p ? ({
   id: String(p._id), productId: String(p._id), title: p.name,
   price: p.basePrice, effectivePrice: p.offerPrice || p.basePrice,
   image: p.images?.[0]?.url || '', imageUrl: p.images?.[0]?.url || '',
-  categoryName: p.categoryId?.name || '', categoryId: p.categoryId?._id || p.categoryId, isAvailable: p.active,
+  categoryName: p.categoryId?.name || '', categoryId: p.categoryId?._id || p.categoryId, brandId:p.brandId?._id||p.brandId||null, brandName:p.brandId?.name||'', brandSlug:p.brandId?.slug||'', brand:p.brandId||null, isAvailable: p.active,
   ...serializeVariantFields(p),
 }) : null;
 const normalizeOrder = (o) => o ? ({
@@ -103,20 +103,40 @@ async function resolveCategory(body){
   if(!category||!category.active) throw new AppError('Select an active Admin category',400,'INVALID_CATEGORY');
   return category;
 }
+
+async function resolveBrand(body, existing={}) {
+  const raw = body.brandId ?? body.brand_id ?? body.brand ?? body.brandSlug ?? body.brand_slug ?? existing.brandId;
+  if (!raw) return null;
+  let brand = null;
+  if (mongoose.isValidObjectId(raw)) brand = await Brand.findById(raw);
+  if (!brand) brand = await Brand.findOne({ $or:[{slug:String(raw).toLowerCase()},{name:new RegExp(`^${String(raw).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,'i')}], active:true });
+  if (!brand) throw new AppError('Select an active Admin-created brand',400,'INVALID_BRAND');
+  return brand;
+}
+
 async function compatibilityProductPayload(body,existing={}){
   const category=await resolveCategory(body);
   const variants=buildVariantFields({...existing,...body},category);
+  const brand=await resolveBrand(body,existing);
   const images=Array.isArray(body.images)?body.images.map(x=>typeof x==='string'?{url:x}:x).filter(x=>x?.url):(existing.images||[]);
-  return {...body,name:body.name||body.title||existing.name,categoryId:category._id,images,...variants};
+  return {...body,name:body.name||body.title||existing.name,categoryId:category._id,brandId:brand?._id||null,images,...variants};
 }
 r.route('/admin/mr-breado/products')
  .get(ah(async(req,res)=>ok(res,(await Product.find().populate('categoryId').sort({createdAt:-1}).lean()).map(normalizeProduct))))
- .post(upload.single('image'),ah(async(req,res)=>{const body={...req.body};const uploaded=await uploadProductImage(req.file);if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body);const product=await Product.create({...payload,slug:req.body.slug||`${String(payload.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-')}-${require('nanoid').nanoid(5)}`,createdBy:req.user.id});ok(res,normalizeProduct(await Product.findById(product._id).populate('categoryId').lean()),'Product created',201)}));
+ .post(upload.single('image'),ah(async(req,res)=>{const body={...req.body};const uploaded=await uploadMedia(req.file,'products');if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body);const product=await Product.create({...payload,slug:req.body.slug||`${String(payload.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-')}-${require('nanoid').nanoid(5)}`,createdBy:req.user.id});ok(res,normalizeProduct(await Product.findById(product._id).populate('categoryId brandId').lean()),'Product created',201)}));
 r.route('/admin/mr-breado/products/:id')
- .get(ah(async(req,res)=>{const p=await Product.findById(req.params.id).populate('categoryId').lean();if(!p)throw new AppError('Product not found',404);ok(res,normalizeProduct(p))}))
- .put(upload.single('image'),ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const body={...req.body};const uploaded=await uploadProductImage(req.file);if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body,existing);const p=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId').lean();ok(res,normalizeProduct(p),'Product updated')}))
+ .get(ah(async(req,res)=>{const p=await Product.findById(req.params.id).populate('categoryId brandId').lean();if(!p)throw new AppError('Product not found',404);ok(res,normalizeProduct(p))}))
+ .put(upload.single('image'),ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const body={...req.body};const uploaded=await uploadMedia(req.file,'products');if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body,existing);const p=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId brandId').lean();ok(res,normalizeProduct(p),'Product updated')}))
  .delete(ah(async(req,res)=>{await Product.findByIdAndUpdate(req.params.id,{$set:{active:false}});ok(res,null,'Product disabled')}));
 r.patch('/admin/mr-breado/products/:id/availability',ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:req.body.isAvailable??req.body.available??true}},{new:true}).populate('categoryId').lean()))));
+
+r.route('/admin/brands')
+ .get(ah(async(req,res)=>ok(res,(await Brand.find().sort({name:1}).lean()).map(b=>({...b,id:String(b._id),image:b.image?.url||'',imageUrl:b.image?.url||''})))))
+ .post(upload.single('image'),ah(async(req,res)=>{const name=String(req.body.name||'').trim();if(!name)throw new AppError('Brand name is required',400);const media=await uploadMedia(req.file,'brands');const slug=String(req.body.slug||name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');const brand=await Brand.create({name,slug,image:media||imageUrl(req.body.imageUrl||req.body.image),active:req.body.active!==false&&String(req.body.active)!=='false'});ok(res,{...brand.toObject(),id:String(brand._id),image:brand.image?.url||'',imageUrl:brand.image?.url||''},'Brand created',201)}));
+r.route('/admin/brands/:id')
+ .put(upload.single('image'),ah(async(req,res)=>{const update={};if(req.body.name)update.name=String(req.body.name).trim();if(req.body.slug||req.body.name)update.slug=String(req.body.slug||req.body.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');if(req.body.active!==undefined)update.active=String(req.body.active)!=='false';const media=await uploadMedia(req.file,'brands');if(media)update.image=media;else if(req.body.imageUrl||req.body.image)update.image=imageUrl(req.body.imageUrl||req.body.image);const brand=await Brand.findByIdAndUpdate(req.params.id,{$set:update},{new:true,runValidators:true}).lean();ok(res,{...brand,id:String(brand._id),image:brand.image?.url||'',imageUrl:brand.image?.url||''},'Brand updated')}))
+ .delete(ah(async(req,res)=>{await Brand.findByIdAndUpdate(req.params.id,{$set:{active:false}});ok(res,null,'Brand disabled')}));
+
 r.get('/admin/dashboard/recent-orders', ah(async(req,res)=>ok(res,(await Order.find().populate('customerId outletId riderId').sort({createdAt:-1}).limit(10).lean()).map(normalizeOrder))));
 r.get('/admin/dashboard/revenue', ah(async(req,res)=>ok(res,{items:await Order.aggregate([{$match:{status:'DELIVERED'}},{$group:{_id:{$dateToString:{format:'%Y-%m-%d',date:'$deliveredAt'}},revenue:{$sum:'$total'},orders:{$sum:1}}},{$sort:{_id:1}},{$limit:30}])})));
 r.get('/admin/dashboard/payments', ah(async(req,res)=>ok(res,await Payment.aggregate([{$group:{_id:'$status',amount:{$sum:'$amount'},count:{$sum:1}}}]))));
@@ -167,10 +187,19 @@ r.get(['/admin/outlets/:id/performance','/admin/outlets/:id/calendar'], ah(async
 r.get(['/admin/payment-controls','/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
   const [features,adminSettings,delivery,rider]=await Promise.all([settings.getBusinessFeatures(),settings.adminSettings(),settings.get('delivery_settings'),settings.get('rider_settings')]);
   const rp=adminSettings.secrets.find(x=>x.key==='razorpay_credentials')||{};const gm=adminSettings.secrets.find(x=>x.key==='google_maps_credentials')||{};
-  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayKeyId:rp.keyId||'',razorpaySecretConfigured:rp.keySecretConfigured,razorpayWebhookSecretConfigured:rp.webhookSecretConfigured,googleMapKey:gm.apiKey||'',googleMapsApiKey:gm.apiKey||'',googleMapsApiKeyConfigured:gm.configured,baseDeliveryCharge:delivery?.baseCharge||0,deliveryChargePerKm:delivery?.perKmCharge||0,minimumDeliveryCharge:delivery?.minimumCharge||0,maximumDeliveryCharge:delivery?.maximumCharge||9999,riderBasePay:rider?.basePay||0,riderPayPerKm:rider?.perKmRate||0,distanceProvider:'GOOGLE'});
+  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayKeyId:rp.keyId||'',razorpaySecretConfigured:rp.keySecretConfigured,razorpayWebhookSecretConfigured:rp.webhookSecretConfigured,googleMapKey:gm.apiKey||'',googleMapsApiKey:gm.apiKey||'',googleMapsApiKeyConfigured:Boolean(gm.configured&&gm.apiKey),googleMapsAdminActionRequired:!Boolean(gm.configured&&gm.apiKey),googleMapsStatusMessage:Boolean(gm.configured&&gm.apiKey)?'Google Maps API key is configured':'Google Maps API key is required before delivery can be enabled',baseDeliveryCharge:delivery?.baseCharge||0,deliveryChargePerKm:delivery?.perKmCharge||0,minimumDeliveryCharge:delivery?.minimumCharge||0,maximumDeliveryCharge:delivery?.maximumCharge||9999,riderBasePay:rider?.basePay||0,riderPayPerKm:rider?.perKmRate||0,distanceProvider:'GOOGLE'});
 }));
 r.put('/admin/payment-controls', ah(async(req,res)=>{await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.onlinePaymentEnabled,takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,feature_toggles:{cod:req.body.codEnabled!==false}},req.user.id,{requestId:req.id});if(req.body.razorpayKeyId||req.body.razorpayKeySecret)await settings.setSecret('razorpay_credentials',{keyId:req.body.razorpayKeyId,keySecret:req.body.razorpayKeySecret||undefined,webhookSecret:req.body.razorpayWebhookSecret||undefined,enabled:req.body.onlinePaymentEnabled!==false},req.user.id,{requestId:req.id});ok(res,await settings.getBusinessFeatures(),'Payment controls saved')}));
-r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{if(req.body.googleMapKey||req.body.googleMapsApiKey)await settings.setSecret('google_maps_credentials',{apiKey:req.body.googleMapKey||req.body.googleMapsApiKey,enabled:req.body.googleMapsEnabled!==false},req.user.id,{requestId:req.id});await settings.set('delivery_settings',{baseCharge:Number(req.body.baseDeliveryCharge||0),perKmCharge:Number(req.body.deliveryChargePerKm||0),minimumCharge:Number(req.body.minimumDeliveryCharge||0),maximumCharge:Number(req.body.maximumDeliveryCharge||9999)},req.user.id,true,{requestId:req.id});await settings.set('rider_settings',{basePay:Number(req.body.riderBasePay||0),perKmRate:Number(req.body.riderPayPerKm||0),monthlySettlementDay:Number(req.body.monthlySettlementDay||1)},req.user.id,false,{requestId:req.id});ok(res,{saved:true},'API and business settings saved')}));
+r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
+  const apiKey=String(req.body.googleMapKey||req.body.googleMapsApiKey||'').trim();
+  const current=await settings.getGoogleMapsConfig(false);
+  if(!apiKey&&!current?.apiKey) throw new AppError('Google Maps API key is required',400,'GOOGLE_MAPS_KEY_REQUIRED');
+  if(apiKey) await settings.setSecret('google_maps_credentials',{apiKey,enabled:req.body.googleMapsEnabled!==false,adminConfigured:true},req.user.id,{requestId:req.id});
+  await settings.set('delivery_settings',{baseCharge:Number(req.body.baseDeliveryCharge||0),perKmCharge:Number(req.body.deliveryChargePerKm||0),minimumCharge:Number(req.body.minimumDeliveryCharge||0),maximumCharge:Number(req.body.maximumDeliveryCharge||9999)},req.user.id,true,{requestId:req.id});
+  await settings.set('rider_settings',{basePay:Number(req.body.riderBasePay||0),perKmRate:Number(req.body.riderPayPerKm||0),monthlySettlementDay:Number(req.body.monthlySettlementDay||1)},req.user.id,false,{requestId:req.id});
+  ok(res,{saved:true,googleMapsApiKeyConfigured:true},'API and business settings saved');
+}));
+r.post('/admin/api-keys/validate-google', ah(async(req,res)=>ok(res,await settings.validateIntegration('google_maps_credentials'),'Google Maps API key is valid')));
 
 r.get(['/admin/mr-breado/orders','/admin/orders/:id'], ah(async(req,res,next)=>{if(req.params.id){const o=await Order.findById(req.params.id).populate('customerId outletId riderId').lean();if(!o)throw new AppError('Order not found',404);return ok(res,normalizeOrder(o));}return ok(res,(await Order.find().populate('customerId outletId riderId').sort({createdAt:-1}).lean()).map(normalizeOrder));}));
 for(const [suffix,status] of [['accept','ACCEPTED'],['preparing','PREPARING'],['ready','READY'],['reject','REJECTED']]) r.post(`/admin/mr-breado/orders/:id/${suffix}`,ah(async(req,res)=>{const o=await Order.findById(req.params.id);if(!o)throw new AppError('Order not found',404);ok(res,normalizeOrder((await orderService.changeStatus(o,req.user,status,req.body.reason,req.headers['idempotency-key']||`${req.id}:${status}`)).toObject?.()||o))}));

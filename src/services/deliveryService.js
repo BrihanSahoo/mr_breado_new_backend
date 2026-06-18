@@ -68,56 +68,62 @@ async function normalizeCoordinates({ latitude, longitude, address, pincode, cit
   return { ...supplied, formattedAddress: coded.formattedAddress, pincode: coded.pincode || cleanPincode(pincode) };
 }
 
+async function googleRoadDistances(origin, outlets) {
+  const cfg = await settings.getGoogleMapsConfig(true);
+  if (!cfg?.apiKey) throw new AppError('Google Maps API key has not been configured by Admin', 503, 'GOOGLE_MAPS_NOT_CONFIGURED');
+  const valid = outlets.map((outlet) => ({ outlet, coords: storedOutletCoordinates(outlet) })).filter((x) => x.coords.valid);
+  if (!valid.length) return new Map();
+  const result = new Map();
+  for (let index = 0; index < valid.length; index += 25) {
+    const batch = valid.slice(index, index + 25);
+    const response = await axios.get('https://maps.googleapis.com/maps/api/distancematrix/json', {
+      params: {
+        origins: `${origin.latitude},${origin.longitude}`,
+        destinations: batch.map((x) => `${x.coords.latitude},${x.coords.longitude}`).join('|'),
+        mode: 'driving', units: 'metric', region: 'in', key: cfg.apiKey,
+      }, timeout: 15000,
+    });
+    if (response.data?.status !== 'OK') throw new AppError(`Google distance lookup failed: ${response.data?.status || 'UNKNOWN'}`, 503, 'GOOGLE_DISTANCE_FAILED');
+    const elements = response.data?.rows?.[0]?.elements || [];
+    batch.forEach((entry, i) => {
+      const element = elements[i];
+      if (element?.status === 'OK' && Number.isFinite(Number(element.distance?.value))) {
+        result.set(String(entry.outlet._id), {
+          distanceKm: Number((Number(element.distance.value) / 1000).toFixed(2)),
+          durationMinutes: Math.max(1, Math.ceil(Number(element.duration?.value || 0) / 60)),
+        });
+      }
+    });
+  }
+  return result;
+}
+
 async function checkServiceability({ latitude, longitude, pincode, address, city, state, outletId }) {
   const requestedPincode = cleanPincode(pincode);
   const coords = await normalizeCoordinates({ latitude, longitude, pincode, address, city, state });
-  const query = { active: true, open: true };
+  if (coords.latitude == null || coords.longitude == null) {
+    return { ...coords, pincode: requestedPincode, serviceable:false, deliverable:false, canDeliver:false, code:'USER_LOCATION_REQUIRED', message:'Enable location access so we can find a nearby outlet.' };
+  }
+  const query = { active:true, open:true };
   if (outletId) query._id = outletId;
   const outlets = await Outlet.find(query).lean();
-  if (!outlets.length) return { ...coords, pincode: requestedPincode, serviceable: false, deliverable: false, canDeliver: false, message: 'No active outlet is currently available.' };
+  if (!outlets.length) return { ...coords, pincode:requestedPincode, serviceable:false, deliverable:false, canDeliver:false, code:'NO_ACTIVE_OUTLET', message:'No outlet is currently available near you.' };
 
-  const ranked = outlets.map((o) => {
-    const stored = storedOutletCoordinates(o);
-    const outletPincode = cleanPincode(o.address?.pincode);
-    const pincodeMatch = validPincode(requestedPincode) && outletPincode === requestedPincode;
-    const hasBothCoordinates = stored.valid && coords.latitude != null && coords.longitude != null;
-    const distanceKm = hasBothCoordinates
-      ? Number(haversineKm(stored.latitude, stored.longitude, coords.latitude, coords.longitude).toFixed(2))
-      : null;
-    const radius = Number(o.deliveryRadiusKm || 0);
-    const distanceWorks = distanceKm != null && Number.isFinite(distanceKm);
-    const distanceServiceable = distanceWorks && radius > 0 && distanceKm <= radius;
-    // Safety fallback requested for production: same 6-digit pincode is serviceable when
-    // Google/geocoding/coordinates fail or produce an obviously unusable result.
-    const fallbackUsed = pincodeMatch && (!distanceWorks || coords.geocodingUnavailable || distanceKm > 500);
-    return { outlet: o, distanceKm, radius, pincodeMatch, fallbackUsed, serviceable: distanceServiceable || fallbackUsed };
-  }).sort((a,b) => {
-    if (a.serviceable !== b.serviceable) return a.serviceable ? -1 : 1;
-    if (a.pincodeMatch !== b.pincodeMatch) return a.pincodeMatch ? -1 : 1;
-    return (a.distanceKm ?? Number.MAX_SAFE_INTEGER) - (b.distanceKm ?? Number.MAX_SAFE_INTEGER);
-  });
+  const road = await googleRoadDistances(coords, outlets);
+  const ranked = outlets.map((outlet) => {
+    const route = road.get(String(outlet._id));
+    const radius = Number(outlet.deliveryRadiusKm || 0);
+    const distanceKm = route?.distanceKm ?? null;
+    const serviceable = distanceKm != null && radius > 0 && distanceKm <= radius;
+    return { outlet, radius, distanceKm, durationMinutes: route?.durationMinutes ?? null, serviceable };
+  }).sort((a,b) => (a.distanceKm ?? Number.MAX_SAFE_INTEGER) - (b.distanceKm ?? Number.MAX_SAFE_INTEGER));
 
-  const best = ranked[0];
-  const safeDistance = best.distanceKm ?? 0;
-  const charge = best.serviceable ? deliveryCharge(safeDistance, best.outlet.deliverySettings || {}) : 0;
-  return {
-    ...coords,
-    pincode: requestedPincode || coords.pincode,
-    serviceable: best.serviceable,
-    deliverable: best.serviceable,
-    canDeliver: best.serviceable,
-    nearestOutletId: String(best.outlet._id),
-    nearestOutletName: best.outlet.name,
-    distanceKm: safeDistance,
-    deliveryRadiusKm: best.radius,
-    allowedRadiusKm: best.radius,
-    pincodeMatched: best.pincodeMatch,
-    pincodeFallbackUsed: best.fallbackUsed,
-    deliveryCharge: charge,
-    message: best.serviceable
-      ? (best.fallbackUsed ? `Delivery is available from ${best.outlet.name} for pincode ${requestedPincode}.` : `Delivery is available from ${best.outlet.name}.`)
-      : `Delivery is unavailable for pincode ${requestedPincode || 'the selected address'}.`,
-  };
+  const best = ranked.find((x) => x.serviceable) || ranked[0];
+  if (!best || !best.serviceable) {
+    return { ...coords, pincode:requestedPincode, serviceable:false, deliverable:false, canDeliver:false, code:'NO_OUTLET_IN_RANGE', nearestOutletId:best?String(best.outlet._id):null, nearestOutletName:best?.outlet?.name||null, distanceKm:best?.distanceKm||0, deliveryRadiusKm:best?.radius||0, allowedRadiusKm:best?.radius||0, deliveryCharge:0, message:'No outlet is available within the delivery range of your current location.' };
+  }
+  const charge = deliveryCharge(best.distanceKm, best.outlet.deliverySettings || {});
+  return { ...coords, pincode:requestedPincode || coords.pincode, serviceable:true, deliverable:true, canDeliver:true, code:'OUTLET_AVAILABLE', nearestOutletId:String(best.outlet._id), nearestOutletName:best.outlet.name, distanceKm:best.distanceKm, estimatedTravelMinutes:best.durationMinutes, deliveryRadiusKm:best.radius, allowedRadiusKm:best.radius, deliveryCharge:charge, message:`Delivery is available from ${best.outlet.name}.` };
 }
 
-module.exports = { cleanPincode, validPincode, geocode, normalizeCoordinates, checkServiceability, coordinatePair, storedOutletCoordinates };
+module.exports = { cleanPincode, validPincode, geocode, normalizeCoordinates, checkServiceability, coordinatePair, storedOutletCoordinates, googleRoadDistances };

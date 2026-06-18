@@ -142,7 +142,8 @@ async function getRazorpayConfig(requireEnabled=true) {
 async function getGoogleMapsConfig(requireEnabled=true) {
   const row = await Setting.findOne({key:'google_maps_credentials',active:true}).lean();
   const dynamic = row ? decrypt(row) : null;
-  const cfg = dynamic || {apiKey:env.googleMapsKey,enabled:true};
+  const cfg = dynamic || {apiKey:'',enabled:false,adminConfigured:false};
+  cfg.adminConfigured = Boolean(dynamic?.apiKey);
   if (requireEnabled && cfg.enabled === false) throw new AppError('Google Maps is disabled',503,'MAPS_DISABLED');
   return cfg;
 }

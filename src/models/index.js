@@ -51,7 +51,7 @@ const OutletProduct = models.OutletProduct || model('OutletProduct', new Schema(
 },{timestamps:true}));
 OutletProduct.schema.index({outletId:1,productId:1},{unique:true});
 
-const Cart = models.Cart || model('Cart', new Schema({ customerId:objectId('User',true), outletId:objectId('Outlet',true), items:[{productId:objectId('Product',true),quantity:{type:Number,min:1,required:true},customizations:[{groupName:String,optionName:String,price:Number}]}], couponCode:String },{timestamps:true}));
+const Cart = models.Cart || model('Cart', new Schema({ customerId:objectId('User',true), outletId:objectId('Outlet',true), items:[{productId:objectId('Product',true),quantity:{type:Number,min:1,required:true},customizations:[{groupName:String,optionName:String,price:Number}],selectedSize:String,selectedWeight:String,cakeMessage:String}], couponCode:String },{timestamps:true}));
 Cart.schema.index({customerId:1,outletId:1},{unique:true});
 
 const orderItemSchema = new Schema({ productId:objectId('Product'), name:String, slug:String, sku:String, image:String, quantity:Number, unitPrice:Number, offerPrice:Number, tax:Number, customizations:[Schema.Types.Mixed], selectedSize:String, selectedWeight:String, finalTotal:Number },{_id:true});
@@ -64,6 +64,21 @@ const OrderEvent = models.OrderEvent || model('OrderEvent', new Schema({ orderId
 const InventoryMovement = models.InventoryMovement || model('InventoryMovement', new Schema({ outletId:objectId('Outlet',true),productId:objectId('Product',true),type:String,quantityBefore:Number,quantityChanged:Number,quantityAfter:Number,reservedBefore:Number,reservedAfter:Number,referenceType:String,referenceId:Schema.Types.ObjectId,reason:String,performedBy:objectId('User'),idempotencyKey:{type:String,unique:true} },{timestamps:true}));
 const Payment = models.Payment || model('Payment', new Schema({ orderId:objectId('Order'),customerId:objectId('User',true),outletId:objectId('Outlet'),gateway:{type:String,default:'RAZORPAY'},gatewayOrderId:{type:String,sparse:true},gatewayPaymentId:{type:String,sparse:true},signature:String,amount:Number,currency:{type:String,default:'INR'},tax:Number,status:{type:String,default:'PENDING',index:true},failureReason:String,idempotencyKey:{type:String,unique:true,sparse:true},rawMetadata:Schema.Types.Mixed },{timestamps:true}));
 Payment.schema.index({gateway:1,gatewayOrderId:1},{unique:true,sparse:true}); Payment.schema.index({gateway:1,gatewayPaymentId:1},{unique:true,sparse:true});
+
+const PaymentWebhookEvent = models.PaymentWebhookEvent || model('PaymentWebhookEvent', new Schema({
+  eventId:{type:String,required:true,unique:true,index:true},
+  eventType:{type:String,required:true,index:true},
+  gateway:{type:String,default:'RAZORPAY',index:true},
+  signature:String,
+  payloadHash:{type:String,required:true},
+  processed:{type:Boolean,default:false,index:true},
+  processedAt:Date,
+  processingError:String,
+  paymentId:objectId('Payment'),
+  orderId:objectId('Order'),
+  rawMetadata:Schema.Types.Mixed
+},{timestamps:true}));
+
 const Refund = models.Refund || model('Refund', new Schema({orderId:objectId('Order',true),paymentId:objectId('Payment',true),customerId:objectId('User',true),outletId:objectId('Outlet',true),amount:Number,cancellationReason:String,gatewayRefundId:String,status:{type:String,default:'PENDING',index:true},adminAcknowledgement:{type:Boolean,default:false},adminNote:String,processedBy:objectId('User'),processedAt:Date},{timestamps:true}));
 Refund.schema.index({orderId:1,paymentId:1},{unique:true});
 const RiderLocation = models.RiderLocation || model('RiderLocation', new Schema({riderId:objectId('User',true),orderId:objectId('Order'),location:{type:{type:String,default:'Point'},coordinates:[Number]},heading:Number,speed:Number,accuracy:Number,recordedAt:{type:Date,default:Date.now}}, {timestamps:true})); RiderLocation.schema.index({location:'2dsphere'}); RiderLocation.schema.index({riderId:1,recordedAt:-1});
@@ -85,4 +100,4 @@ const SupportTicket = models.SupportTicket || model('SupportTicket', new Schema(
 const VerificationRequest = models.VerificationRequest || model('VerificationRequest', new Schema({userId:objectId('User',true),outletId:objectId('Outlet'),type:String,status:{type:String,default:'PENDING',index:true},documents:[imageSchema],note:String,reviewedBy:objectId('User'),reviewedAt:Date},{timestamps:true}));
 const DailyClosing = models.DailyClosing || model('DailyClosing', new Schema({outletId:objectId('Outlet',true),sellerId:objectId('User',true),businessDate:{type:String,required:true},stockSnapshot:[{productId:objectId('Product'),stockQuantity:Number,reservedQuantity:Number}],onlineSales:Number,offlineSales:Number,totalSales:Number,notes:String,submittedAt:{type:Date,default:Date.now}},{timestamps:true})); DailyClosing.schema.index({outletId:1,businessDate:1},{unique:true});
 
-module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,Refund,RiderLocation,RiderCashTransaction,RiderEarning,OfflineSale,Invoice,Setting,SettingAudit,Notification,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};
+module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,PaymentWebhookEvent,Refund,RiderLocation,RiderCashTransaction,RiderEarning,OfflineSale,Invoice,Setting,SettingAudit,Notification,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};
