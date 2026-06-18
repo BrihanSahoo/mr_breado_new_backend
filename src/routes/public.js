@@ -1,0 +1,18 @@
+const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {Category,Brand,Banner,Offer,Product,Outlet,OutletProduct}=require('../models');const settings=require('../services/settingsService');
+const active={active:true};
+r.get(['/settings','/payment/settings','/payments/settings','/payment/options','/app/settings','/public/settings'],ah(async(req,res)=>ok(res,await settings.publicSettings())));
+r.get(['/categories','/food-categories'],ah(async(req,res)=>ok(res,await Category.find(active).sort({sortOrder:1,name:1}).lean())));
+r.get('/categories/sub-categories',ah(async(req,res)=>ok(res,await Category.find({active:true,parentId:{$ne:null}}).lean())));
+r.get('/brands',ah(async(req,res)=>ok(res,await Brand.find(active).lean())));
+r.get('/banners',ah(async(req,res)=>ok(res,await Banner.find(active).sort({sortOrder:1}).lean())));
+r.get('/offers',ah(async(req,res)=>ok(res,await Offer.find({active:true,startAt:{$lte:new Date()},endAt:{$gte:new Date()}}).lean())));
+r.get('/products',ah(async(req,res)=>{const q={active:true};if(req.query.categoryId)q.categoryId=req.query.categoryId;if(req.query.category)q.categoryId=req.query.category;if(req.query.search)q.$text={$search:req.query.search};ok(res,await Product.find(q).populate('categoryId').limit(Math.min(100,Number(req.query.limit||30))).lean())}));
+r.get('/products/:slug',ah(async(req,res)=>ok(res,await Product.findOne({slug:req.params.slug,active:true}).populate('categoryId brandId').lean())));
+r.get(['/restaurants','/outlets'],ah(async(req,res)=>ok(res,await Outlet.find({active:true,open:true}).lean())));
+r.get(['/restaurants/nearby','/outlets/nearby'],ah(async(req,res)=>{const lat=Number(req.query.latitude||req.query.lat),lng=Number(req.query.longitude||req.query.lng);const rows=Number.isFinite(lat)&&Number.isFinite(lng)?await Outlet.aggregate([{$geoNear:{near:{type:'Point',coordinates:[lng,lat]},distanceField:'distanceMeters',spherical:true,query:{active:true,open:true}}},{$addFields:{distanceKm:{$divide:['$distanceMeters',1000]}}},{$match:{$expr:{$lte:['$distanceKm','$deliveryRadiusKm']}}},{$limit:50}]):await Outlet.find({active:true,open:true}).lean();ok(res,rows)}));
+r.get(['/restaurants/:slug','/stores/:slug'],ah(async(req,res)=>ok(res,await Outlet.findOne({slug:req.params.slug,active:true}).lean())));
+async function menu(outletId,query={}){const q={outletId,enabled:true,available:true,stockQuantity:{$gt:0}};const rows=await OutletProduct.find(q).populate({path:'productId',match:{active:true}}).populate('outletId').lean();return rows.filter(x=>x.productId).filter(x=>!query.categoryId||String(x.productId.categoryId)===String(query.categoryId)).filter(x=>!query.search||x.productId.name.toLowerCase().includes(String(query.search).toLowerCase())).map(x=>({...x.productId,outletProductId:x._id,outletId:x.outletId._id,stockQuantity:x.stockQuantity,reservedQuantity:x.reservedQuantity,availableStock:x.stockQuantity-x.reservedQuantity,price:x.offerPriceOverride??x.priceOverride??(x.productId.offerPrice||x.productId.basePrice),preparationMinutes:x.preparationMinutes}));}
+r.get(['/outlets/:id/menu','/user/outlets/:id/menu','/outlets/:id/foods/search','/user/outlets/:id/foods/search'],ah(async(req,res)=>ok(res,await menu(req.params.id,req.query))));
+r.get(['/stores/:slug/menu','/restaurants/:slug/menu'],ah(async(req,res)=>{const o=await Outlet.findOne({slug:req.params.slug,active:true});ok(res,o?await menu(o._id,req.query):[])}));
+r.get('/home',ah(async(req,res)=>ok(res,{banners:await Banner.find(active).lean(),categories:await Category.find(active).lean(),offers:await Offer.find(active).lean(),outlets:await Outlet.find({active:true,open:true}).limit(10).lean()})));
+module.exports=r;

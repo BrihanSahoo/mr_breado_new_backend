@@ -1,0 +1,1 @@
+module.exports=(err,req,res,next)=>{const status=err.status||((err.name==='ValidationError'||err.code===11000)?400:500);if(process.env.NODE_ENV!=='production')console.error(err);res.status(status).json({success:false,message:status===500?'Internal server error':err.message,code:err.code||'INTERNAL_ERROR',requestId:req.id,...(err.details?{details:err.details}:{})});};

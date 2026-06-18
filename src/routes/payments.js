@@ -1,0 +1,5 @@
+const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {requireAuth,allowRoles}=require('../middleware/auth');const svc=require('../services/paymentService');const {Payment}=require('../models');
+r.post(['/payments/create-order','/payment/create-order','/razorpay/create-order','/payments/razorpay/create-order','/checkout/razorpay/create-order','/checkout/payment/create-order'],requireAuth,allowRoles('CUSTOMER'),ah(async(req,res)=>ok(res,await svc.createOrder({orderId:req.body.orderId||req.body.appOrderId,userId:req.user.id,idempotencyKey:req.headers['idempotency-key']}),'Payment order created')));
+r.post(['/payments/verify','/payment/verify','/razorpay/verify','/payments/razorpay/verify','/checkout/razorpay/verify','/checkout/payment/verify'],requireAuth,allowRoles('CUSTOMER'),ah(async(req,res)=>ok(res,await svc.verify(req.body,req.user),'Payment verified')));
+r.get('/user/payments',requireAuth,allowRoles('CUSTOMER'),ah(async(req,res)=>ok(res,await Payment.find({customerId:req.user.id}).sort({createdAt:-1}).lean())));
+module.exports=r;

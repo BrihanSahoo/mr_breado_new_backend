@@ -1,0 +1,5 @@
+const jwt=require('jsonwebtoken'); const env=require('../config/env'); const {User}=require('../models'); const {normalizeRole}=require('../utils/roles'); const {AppError}=require('../utils/errors');
+async function requireAuth(req,res,next){try{const h=req.headers.authorization||'';const token=h.startsWith('Bearer ')?h.slice(7):null;if(!token)throw new AppError('Authentication required',401,'UNAUTHENTICATED');const p=jwt.verify(token,env.jwtSecret);const u=await User.findById(p.sub).lean();if(!u||!u.active)throw new AppError('Invalid account',401,'UNAUTHENTICATED');req.user={...u,id:String(u._id),role:normalizeRole(u.role)};next();}catch(e){next(e.status?e:new AppError('Invalid or expired token',401,'UNAUTHENTICATED'));}}
+const allowRoles=(...roles)=>(req,res,next)=>roles.map(normalizeRole).includes(normalizeRole(req.user?.role))?next():next(new AppError('Forbidden',403,'FORBIDDEN'));
+const optionalAuth=async(req,res,next)=>{if(!(req.headers.authorization||'').startsWith('Bearer '))return next();return requireAuth(req,res,next)};
+module.exports={requireAuth,allowRoles,optionalAuth};
