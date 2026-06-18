@@ -31,9 +31,29 @@ async function geocode({ address, pincode, city, state }) {
 function coordinatePair(latitude, longitude) {
   const lat = finite(latitude); const lng = finite(longitude);
   if (lat == null || lng == null) return null;
-  if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { latitude: lat, longitude: lng };
-  if (Math.abs(lng) <= 90 && Math.abs(lat) <= 180) return { latitude: lng, longitude: lat, swapped: true };
-  throw new AppError('Invalid latitude or longitude', 400, 'INVALID_COORDINATES');
+  const directValid = Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+  const swappedValid = Math.abs(lng) <= 90 && Math.abs(lat) <= 180;
+  if (!directValid && !swappedValid) throw new AppError('Invalid latitude or longitude', 400, 'INVALID_COORDINATES');
+
+  // India-specific protection: valid numeric coordinates can still be reversed
+  // (for example latitude=86.56, longitude=20.57).
+  const directLooksIndia = lat >= 6 && lat <= 38 && lng >= 68 && lng <= 98;
+  const swappedLooksIndia = lng >= 6 && lng <= 38 && lat >= 68 && lat <= 98;
+  if (swappedLooksIndia && !directLooksIndia) return { latitude: lng, longitude: lat, swapped: true };
+  if (directValid) return { latitude: lat, longitude: lng };
+  return { latitude: lng, longitude: lat, swapped: true };
+}
+
+function storedOutletCoordinates(outlet) {
+  const raw = outlet?.location?.coordinates || [0, 0];
+  const first = finite(raw[0]);
+  const second = finite(raw[1]);
+  if (first == null || second == null) return { latitude: 0, longitude: 0, corrected: false };
+  // Correct records accidentally stored as [latitude, longitude].
+  const storedCorrect = second >= 6 && second <= 38 && first >= 68 && first <= 98;
+  const storedReversed = first >= 6 && first <= 38 && second >= 68 && second <= 98;
+  if (storedReversed && !storedCorrect) return { latitude: first, longitude: second, corrected: true };
+  return { latitude: second, longitude: first, corrected: false };
 }
 
 async function normalizeCoordinates({ latitude, longitude, address, pincode, city, state }) {
@@ -56,8 +76,8 @@ async function checkServiceability({ latitude, longitude, pincode, address, city
   else outlets = await Outlet.find({ active: true, open: true }).lean();
   if (!outlets.length) return { ...coords, serviceable: false, message: 'No active outlet is currently available.' };
   const ranked = outlets.map((o) => {
-    const [oLng, oLat] = o.location?.coordinates || [0,0];
-    const distanceKm = Number(haversineKm(Number(oLat), Number(oLng), coords.latitude, coords.longitude).toFixed(2));
+    const stored = storedOutletCoordinates(o);
+    const distanceKm = Number(haversineKm(stored.latitude, stored.longitude, coords.latitude, coords.longitude).toFixed(2));
     const radius = Number(o.deliveryRadiusKm || 0);
     return { outlet: o, distanceKm, radius, serviceable: radius > 0 && distanceKm <= radius };
   }).sort((a,b) => a.distanceKm - b.distanceKm);
@@ -80,4 +100,4 @@ async function checkServiceability({ latitude, longitude, pincode, address, city
   };
 }
 
-module.exports = { cleanPincode, geocode, normalizeCoordinates, checkServiceability };
+module.exports = { cleanPincode, geocode, normalizeCoordinates, checkServiceability, coordinatePair, storedOutletCoordinates };

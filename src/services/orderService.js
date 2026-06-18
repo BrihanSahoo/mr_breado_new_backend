@@ -66,8 +66,9 @@ async function buildPricing({outletId,items,address,fulfilmentType='DELIVERY',co
   let distanceKm=0,delCharge=0;
   if(type==='DELIVERY'){
     if(address?.latitude==null||address?.longitude==null)throw new AppError('Delivery coordinates required',400,'DELIVERY_COORDINATES_REQUIRED');
-    const [lng,lat]=outlet.location.coordinates;
-    distanceKm=Number(haversineKm(lat,lng,Number(address.latitude),Number(address.longitude)).toFixed(2));
+    const stored=deliveryService.storedOutletCoordinates(outlet);
+    const customer=deliveryService.coordinatePair(address.latitude,address.longitude);
+    distanceKm=Number(haversineKm(stored.latitude,stored.longitude,customer.latitude,customer.longitude).toFixed(2));
     if(distanceKm>outlet.deliveryRadiusKm)throw new AppError('Address is outside outlet delivery radius',409,'OUT_OF_RANGE');
     const ds=outlet.deliverySettings||await settings.get('delivery')||await settings.get('delivery_settings');
     delCharge=deliveryCharge(distanceKm,ds);

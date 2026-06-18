@@ -135,7 +135,7 @@ r.put('/admin/outlets/:id', ah(async(req,res)=>{
   if(req.body.serviceRadiusKm!==undefined)update.deliveryRadiusKm=Number(req.body.serviceRadiusKm);
   if(req.body.isOpen!==undefined)update.open=Boolean(req.body.isOpen);
   if(req.body.status)update.active=String(req.body.status).toUpperCase()==='ACTIVE';
-  if(req.body.latitude!==undefined||req.body.longitude!==undefined) update.location={type:'Point',coordinates:[Number(req.body.longitude||0),Number(req.body.latitude||0)]};
+  if(req.body.latitude!==undefined||req.body.longitude!==undefined){ const c=deliveryService.coordinatePair(req.body.latitude,req.body.longitude); update.location={type:'Point',coordinates:[c.longitude,c.latitude]}; }
   if(typeof req.body.logo==='string')update.logo=imageUrl(req.body.logo);
   if(typeof req.body.coverImage==='string')update.coverImage=imageUrl(req.body.coverImage);
   const out=await Outlet.findByIdAndUpdate(req.params.id,{$set:update},{new:true,runValidators:true}).lean();
