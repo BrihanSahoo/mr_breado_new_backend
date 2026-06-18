@@ -53,3 +53,27 @@ External verification required:
 - Connected nearest outlet, outlet-only menu, cart, addresses, checkout, COD, Razorpay, takeaway, orders, invoices, reviews, notifications and live rider tracking.
 - Added 3 customer compatibility regression tests.
 - Syntax checks passed; 13 tests passed.
+
+## Outlet Manager App alignment
+
+- Added `src/routes/sellerAppCompatibility.js` before the base seller router.
+- Added authenticated assigned-outlet profile, inventory, stock ledger, dashboard, order, invoice, offline-sale, and day-closing flows.
+- Added numeric legacy ID compatibility through existing serializers and resolvers.
+- Added itemized offline sales with stock deductions and idempotency.
+- Added stock changes with MongoDB transaction and immutable inventory movement.
+- Added seller invoice outlet authorization.
+- Added `test/seller-app-compatibility.test.js`.
+
+## Rider application compatibility v7
+
+- Added canonical rider app compatibility router before the base rider router.
+- Added rider registration role aliases for DELIVERY_PARTNER, DRIVER and DELIVERY.
+- Added rider verification, availability and dashboard compatibility.
+- Added active offer serialization and atomic assignment.
+- Added pickup, out-for-delivery, reached-drop, COD collection and delivery completion.
+- Added general and order-specific live location updates with Socket.IO emission.
+- Added cash-in-hand ledger, deposit handling and cash-limit enforcement.
+- Added payout account support.
+- Added rider earnings and delivery history response compatibility.
+- Added persistent rider lifecycle fields and rider cash transaction model.
+- Added 4 focused rider compatibility tests.
