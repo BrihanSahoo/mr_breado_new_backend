@@ -20,6 +20,10 @@ const numberOrNull = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
 const readLat = (x = {}) => numberOrNull(x.latitude ?? x.lat ?? x.userLat ?? x.userLatitude ?? x.user_latitude);
 const readLng = (x = {}) => numberOrNull(x.longitude ?? x.lng ?? x.userLng ?? x.userLongitude ?? x.user_longitude);
 const text = (v) => String(v ?? '').trim();
+const imageUrl = (v) => { if (!v) return ''; if (typeof v === 'string') return v; if (Array.isArray(v)) return imageUrl(v[0]); return imageUrl(v.secure_url || v.secureUrl || v.url || v.src || v.path || v.image || v.imageUrl); };
+const categoryOut = (c) => ({ ...c, id: c.legacyId ?? String(c._id), categoryId: c.legacyId ?? String(c._id), title: c.name, image: imageUrl(c.image), imageUrl: imageUrl(c.image), icon: imageUrl(c.image), status: c.active ? 'ACTIVE' : 'INACTIVE' });
+const bannerOut = (b) => ({ ...b, id: b.legacyId ?? String(b._id), image: imageUrl(b.image), imageUrl: imageUrl(b.image), banner: imageUrl(b.image), couponCode: b.actionType === 'COUPON' ? b.actionValue : undefined });
+const offerOut = (o) => ({ ...o, id: o.legacyId ?? String(o._id), image: imageUrl(o.image), imageUrl: imageUrl(o.image), banner: imageUrl(o.image), couponCode: o.code || '', code: o.code || '' });
 
 async function nearestOutlet(lat, lng) {
   if (Number.isFinite(lat) && Number.isFinite(lng)) {
@@ -48,7 +52,7 @@ async function menu(outletId, query = {}) {
   const search = text(query.search ?? query.q).toLowerCase();
   const category = text(query.categoryId ?? query.category).toLowerCase();
   return rows
-    .filter((row) => row.productId && row.outletId && row.stockQuantity - row.reservedQuantity > 0)
+    .filter((row) => row.productId && row.outletId)
     .filter((row) => !search || [row.productId.name, row.productId.description, row.productId.sku].some((v) => text(v).toLowerCase().includes(search)))
     .filter((row) => !category || [
       String(row.productId.categoryId?._id || ''),
@@ -59,6 +63,19 @@ async function menu(outletId, query = {}) {
     .map((row) => ({
       ...row.productId,
       ...serializeVariantFields(row.productId),
+      id: row.productId.legacyId ?? String(row.productId._id),
+      productId: row.productId.legacyId ?? String(row.productId._id),
+      product_id: row.productId.legacyId ?? String(row.productId._id),
+      title: row.productId.name,
+      image: imageUrl(row.productId.images),
+      imageUrl: imageUrl(row.productId.images),
+      thumbnail: imageUrl(row.productId.images),
+      categoryName: row.productId.categoryId?.name || '',
+      foodType: row.productId.foodType,
+      food_type: row.productId.foodType,
+      isVeg: row.productId.foodType === 'VEG',
+      is_veg: row.productId.foodType === 'VEG',
+      veg: row.productId.foodType === 'VEG',
       outletProductId: row._id,
       outletId: row.outletId._id,
       restaurantId: row.outletId.legacyId,
@@ -69,7 +86,10 @@ async function menu(outletId, query = {}) {
       stock_quantity: row.stockQuantity,
       reservedQuantity: row.reservedQuantity,
       availableStock: row.stockQuantity - row.reservedQuantity,
-      available: row.available,
+      available: row.available && row.stockQuantity - row.reservedQuantity > 0,
+      isAvailable: row.available && row.stockQuantity - row.reservedQuantity > 0,
+      inStock: row.stockQuantity - row.reservedQuantity > 0,
+      outOfStock: row.stockQuantity - row.reservedQuantity <= 0,
       enabled: row.enabled,
       price: row.offerPriceOverride ?? row.priceOverride ?? (row.productId.offerPrice > 0 ? row.productId.offerPrice : row.productId.basePrice),
       effectivePrice: row.offerPriceOverride ?? row.priceOverride ?? (row.productId.offerPrice > 0 ? row.productId.offerPrice : row.productId.basePrice),
@@ -86,7 +106,69 @@ async function addressForUser(userId, compatId) {
 }
 
 async function cartForUser(userId) {
-  return Cart.findOne({ customerId: userId }).populate('items.productId outletId');
+  const cart = await Cart.findOne({ customerId: userId }).populate({path:'items.productId',populate:{path:'categoryId'}}).populate('outletId').lean();
+  if (!cart) return null;
+  const outlet = cart.outletId;
+  const items = (cart.items || []).map((item) => {
+    const p = item.productId || {};
+    const img = imageUrl(p.images);
+    const unitPrice = Number(p.offerPrice > 0 ? p.offerPrice : p.basePrice || 0);
+    const customizationTotal = (item.customizations || []).reduce((sum, c) => sum + Number(c.price || 0), 0);
+    const lineTotal = Number(((unitPrice + customizationTotal) * Number(item.quantity || 1)).toFixed(2));
+    return {
+      ...item,
+      id: item.legacyId ?? String(item._id),
+      cartItemId: item.legacyId ?? String(item._id),
+      cart_item_id: item.legacyId ?? String(item._id),
+      product: {
+        ...p,
+        id: p.legacyId ?? String(p._id),
+        productId: p.legacyId ?? String(p._id),
+        product_id: p.legacyId ?? String(p._id),
+        title: p.name,
+        image: img,
+        imageUrl: img,
+        price: unitPrice,
+        effectivePrice: unitPrice,
+        effective_price: unitPrice,
+        foodType: p.foodType,
+        food_type: p.foodType,
+        isVeg: p.foodType === 'VEG',
+        is_veg: p.foodType === 'VEG',
+        categoryName: p.categoryId?.name || ''
+      },
+      productId: p.legacyId ?? String(p._id),
+      product_id: p.legacyId ?? String(p._id),
+      unitPrice,
+      unit_price: unitPrice,
+      price: unitPrice,
+      lineTotal,
+      line_total: lineTotal,
+      totalPrice: lineTotal,
+      total_price: lineTotal,
+      image: img,
+      imageUrl: img,
+      title: p.name
+    };
+  });
+  const subtotal = items.reduce((sum, i) => sum + Number(i.lineTotal || 0), 0);
+  return {
+    ...cart,
+    items,
+    restaurant: outlet,
+    outlet,
+    restaurantId: outlet?.legacyId ?? String(outlet?._id || ''),
+    restaurant_id: outlet?.legacyId ?? String(outlet?._id || ''),
+    outletId: outlet?.legacyId ?? String(outlet?._id || ''),
+    outlet_id: outlet?.legacyId ?? String(outlet?._id || ''),
+    restaurantName: outlet?.name || '',
+    restaurant_name: outlet?.name || '',
+    subtotal,
+    sub_total: subtotal,
+    itemsTotal: subtotal,
+    items_total: subtotal,
+    total: subtotal
+  };
 }
 
 async function resolveCartProduct(value) {
@@ -109,17 +191,17 @@ async function resolveCartOutlet(productId, requestedOutlet) {
 }
 
 // Public compatibility endpoints used by the existing customer app.
-r.get('/platform/settings', ah(async (req, res) => ok(res, await settings.publicSettings())));
+r.get('/platform/settings', ah(async (req, res) => { const pub=await settings.publicSettings(); const f=await settings.getBusinessFeatures(); ok(res,{...pub,razorpayConfigured:Boolean(pub.payment?.onlinePaymentConfigured),onlinePaymentConfigured:Boolean(pub.payment?.onlinePaymentConfigured),razorpayKeyId:pub.razorpayKeyId||pub.payment?.razorpayKeyId||'',onlinePaymentEnabled:f.feature_toggles.onlinePayment,codEnabled:f.feature_toggles.cod,takeawayEnabled:f.feature_toggles.takeaway,mrBreadoTakeawayEnabled:f.feature_toggles.takeaway,takeawayAdvancePercentage:f.takeaway.advanceValue,takeawayBookingFeePercent:f.takeaway.advanceValue,featureToggles:f.feature_toggles,feature_toggles:f.feature_toggles,takeaway:f.takeaway}); }));
 r.get('/home', ah(async (req, res) => {
   const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
   const [categories, banners, offers, outlets, products] = await Promise.all([
     Category.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean(),
     Banner.find({ active: true }).sort({ sortOrder: 1 }).lean(),
-    Offer.find({ active: true, startAt: { $lte: new Date() }, endAt: { $gte: new Date() } }).lean(),
+    Offer.find({ active: true }).lean(),
     Outlet.find(activeOutlet).sort({ primary: -1, createdAt: 1 }).limit(30).lean(),
     outlet ? menu(outlet._id, req.query) : []
   ]);
-  ok(res, { banners, categories, offers, outlets, restaurants: outlets, products, items: products, featured_foods: products, popular_foods: products, nearestOutlet: outlet });
+  ok(res, { banners:banners.map(bannerOut), categories:categories.map(categoryOut), offers:offers.map(offerOut), outlets, restaurants: outlets, products, items: products, featured_foods: products, popular_foods: products, nearestOutlet: outlet });
 }));
 r.get('/products', ah(async (req, res) => {
   const requested = req.query.outletId ?? req.query.outlet_id ?? req.query.restaurantId ?? req.query.restaurant_id ?? req.query.store;
@@ -282,6 +364,7 @@ async function createOrderFromCart(req, paymentMethod) {
     address,
     fulfilmentType: req.body.orderType ?? req.body.order_type ?? req.body.fulfilmentType ?? 'DELIVERY',
     paymentMethod,
+    couponCode: req.body.promoCode ?? req.body.promo_code ?? req.body.couponCode ?? req.body.coupon_code,
     clientRequestId: req.headers['idempotency-key'] ?? req.body.clientRequestId ?? `customer:${req.user.id}:${Date.now()}`
   });
 }

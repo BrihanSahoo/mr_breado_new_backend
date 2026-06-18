@@ -46,10 +46,12 @@ r.post(['/seller/verification/request','/rider/verification/request'],allowRoles
 r.get(['/seller/verification/status','/rider/verification/status'],allowRoles('SELLER','RIDER'),ah(async(req,res)=>ok(res,await VerificationRequest.findOne({userId:req.user.id}).sort({createdAt:-1}).lean())));
 
 r.use('/admin',allowRoles('ADMIN'));
+function adminPayload(path,body){const out={...body};const raw=body.imageUrl||body.image_url||body.image||body.banner;if(raw)out.image=typeof raw==='string'?{url:raw}:raw;if(path==='offers'||path==='coupons'){if(out.code)out.code=String(out.code).trim().toUpperCase();if(out.startDate&&!out.startAt)out.startAt=out.startDate;if(out.endDate&&!out.endAt)out.endAt=out.endDate;if(out.freeDelivery===true&&!out.type)out.type='FREE_DELIVERY';}if(path==='banners'&&(out.couponCode||out.code)){out.actionType='COUPON';out.actionValue=out.couponCode||out.code;}return out;}
+function adminOut(doc){const raw=doc?.toObject?doc.toObject():doc;if(!raw)return raw;const image=typeof raw.image==='string'?raw.image:(raw.image?.url||'');return{...raw,id:String(raw._id),image,imageUrl:image,banner:image,couponCode:raw.code||(raw.actionType==='COUPON'?raw.actionValue:'')};}
 for (const [path,Model] of [['brands',Brand],['banners',Banner],['offers',Offer],['coupons',Coupon]]) {
-  r.get(`/admin/${path}`,ah(async(req,res)=>ok(res,await Model.find().sort({createdAt:-1}).lean())));
-  r.post(`/admin/${path}`,ah(async(req,res)=>ok(res,await Model.create(req.body),`${path.slice(0,-1)} created`,201)));
-  r.put(`/admin/${path}/:id`,ah(async(req,res)=>ok(res,await Model.findByIdAndUpdate(req.params.id,req.body,{new:true,runValidators:true}))));
+  r.get(`/admin/${path}`,ah(async(req,res)=>ok(res,(await Model.find().sort({createdAt:-1}).lean()).map(adminOut))));
+  r.post(`/admin/${path}`,ah(async(req,res)=>ok(res,adminOut(await Model.create(adminPayload(path,req.body))),`${path.slice(0,-1)} created`,201)));
+  r.put(`/admin/${path}/:id`,ah(async(req,res)=>ok(res,adminOut(await Model.findByIdAndUpdate(req.params.id,adminPayload(path,req.body),{new:true,runValidators:true})))));
   r.delete(`/admin/${path}/:id`,ah(async(req,res)=>{await Model.findByIdAndDelete(req.params.id);ok(res,null,'Deleted')}));
 }
 r.get('/admin/users',ah(async(req,res)=>ok(res,await User.find(req.query.role?{role:req.query.role}:{}).select('-passwordHash').sort({createdAt:-1}).lean())));

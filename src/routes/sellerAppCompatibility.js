@@ -107,16 +107,23 @@ r.put('/seller/products/:id', ah(async (req, res) => {
   const outletId = await currentOutlet(req);
   const productId = await resolveObjectId(Product, req.params.id);
   if (!productId) throw new AppError('Product not found', 404);
-  const update = {};
-  if (req.body.stockQuantity !== undefined || req.body.stock !== undefined || req.body.stock_qty !== undefined) update.stockQuantity = Number(req.body.stockQuantity ?? req.body.stock ?? req.body.stock_qty);
-  if (req.body.lowStockThreshold !== undefined || req.body.lowStockAlert !== undefined) update.lowStockThreshold = Number(req.body.lowStockThreshold ?? req.body.lowStockAlert);
-  if (req.body.price !== undefined || req.body.sellingPrice !== undefined) update.priceOverride = Number(req.body.price ?? req.body.sellingPrice);
-  if (req.body.offerPrice !== undefined) update.offerPriceOverride = Number(req.body.offerPrice);
-  if (req.body.preparationMinutes !== undefined) update.preparationMinutes = Number(req.body.preparationMinutes);
-  if (req.body.available !== undefined || req.body.isAvailable !== undefined) update.available = Boolean(req.body.available ?? req.body.isAvailable);
-  const row = await OutletProduct.findOneAndUpdate({ outletId, productId }, { $set: update }, { new: true, runValidators: true }).populate('productId');
-  if (!row) throw new AppError('Product is not assigned to this outlet', 404);
-  ok(res, productDto(row), 'Product updated');
+  const stockQuantity = Number(req.body.stockQuantity ?? req.body.stock ?? req.body.stock_qty);
+  if (!Number.isFinite(stockQuantity) || stockQuantity < 0) throw new AppError('Invalid stock quantity', 400);
+  const session = await mongoose.startSession();
+  let row;
+  try {
+    await session.withTransaction(async () => {
+      row = await OutletProduct.findOne({ outletId, productId }).session(session);
+      if (!row) throw new AppError('Product is not assigned to this outlet', 404);
+      const before = row.stockQuantity;
+      row.stockQuantity = stockQuantity;
+      row.available = stockQuantity > 0;
+      await row.save({ session });
+      await InventoryMovement.create([{ outletId, productId, type: 'MANUAL_ADJUSTMENT', quantityBefore: before, quantityChanged: stockQuantity-before, quantityAfter: stockQuantity, reservedBefore: row.reservedQuantity, reservedAfter: row.reservedQuantity, referenceType: 'SELLER_STOCK_UPDATE', reason: req.body.note || 'Seller real-time stock update', performedBy: req.user.id, idempotencyKey: req.headers['idempotency-key'] || `seller-stock:${outletId}:${productId}:${Date.now()}` }], { session });
+    });
+  } finally { await session.endSession(); }
+  await row.populate('productId');
+  ok(res, productDto(row), stockQuantity > 0 ? 'Stock updated' : 'Product marked out of stock');
 }));
 
 r.patch('/seller/products/:id/availability', ah(async (req, res) => {
@@ -142,9 +149,7 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
       const after = Number(req.body.stockQuantity ?? req.body.stock ?? 0);
       if (!Number.isFinite(after) || after < 0) throw new AppError('Invalid stock quantity', 400);
       row.stockQuantity = after;
-      row.lowStockThreshold = Number(req.body.lowStockAlert ?? req.body.lowStockThreshold ?? row.lowStockThreshold);
-      row.preparationMinutes = Number(req.body.preparationMinutes ?? row.preparationMinutes);
-      row.available = Boolean(req.body.isAvailable ?? req.body.available ?? row.available);
+      row.available = after > 0;
       await row.save({ session });
       await InventoryMovement.create([{ outletId, productId, type: 'MANUAL_ADJUSTMENT', quantityBefore: before, quantityChanged: after - before, quantityAfter: after, reservedBefore: row.reservedQuantity, reservedAfter: row.reservedQuantity, referenceType: 'SELLER_STOCK_UPDATE', reason: req.body.note || 'Seller stock update', performedBy: req.user.id, idempotencyKey: req.headers['idempotency-key'] || `seller-stock:${outletId}:${productId}:${Date.now()}` }], { session });
     });
