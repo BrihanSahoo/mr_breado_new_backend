@@ -1,4 +1,4 @@
-# Mr Breado MongoDB Backend
+# Mr. Breado MongoDB Backend
 
 A clean Node.js/Express/Mongoose implementation for MongoDB Atlas that preserves the existing `/api` endpoint contract used by the Admin, Seller, Customer, and Rider applications.
 

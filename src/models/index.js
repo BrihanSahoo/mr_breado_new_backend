@@ -37,7 +37,13 @@ Outlet.schema.index({location:'2dsphere'});
 const Category = models.Category || model('Category', new Schema({ name:{type:String,required:true,trim:true}, slug:{type:String,required:true,unique:true,index:true}, image:imageSchema, description:String, active:{type:Boolean,default:true,index:true}, parentId:objectId('Category'), sortOrder:{type:Number,default:0} },{timestamps:true}));
 const Brand = models.Brand || model('Brand', new Schema({name:{type:String,required:true},slug:{type:String,required:true,unique:true},image:imageSchema,active:{type:Boolean,default:true}}, {timestamps:true}));
 const Product = models.Product || model('Product', new Schema({
-  name:{type:String,required:true,trim:true}, slug:{type:String,required:true,unique:true,index:true}, sku:{type:String,unique:true,sparse:true,index:true}, description:String, images:[imageSchema], categoryId:objectId('Category'), subcategoryId:objectId('Category'), brandId:objectId('Brand'), basePrice:money, offerPrice:money, ingredients:[String], nutritionalInfo:Schema.Types.Mixed, active:{type:Boolean,default:true,index:true}, featured:{type:Boolean,default:false}, foodType:{type:String,enum:['VEG','NON_VEG','EGG','VEGAN','OTHER'],default:'OTHER'}, customizationGroups:[{name:String,type:{type:String,enum:['SINGLE','MULTIPLE']},required:Boolean,minSelect:Number,maxSelect:Number,options:[{name:String,price:Number,active:{type:Boolean,default:true}}]}], createdBy:objectId('User')
+  name:{type:String,required:true,trim:true}, slug:{type:String,required:true,unique:true,index:true}, sku:{type:String,unique:true,sparse:true,index:true}, description:String, images:[imageSchema], categoryId:objectId('Category'), subcategoryId:objectId('Category'), brandId:objectId('Brand'), basePrice:money, offerPrice:money, ingredients:[String], nutritionalInfo:Schema.Types.Mixed, active:{type:Boolean,default:true,index:true}, featured:{type:Boolean,default:false}, foodType:{type:String,enum:['VEG','NON_VEG','EGG','VEGAN','OTHER'],default:'OTHER'},
+  variantType:{type:String,enum:['STANDARD','PIZZA','CAKE'],default:'STANDARD',index:true},
+  defaultVariant:{type:String,default:''},
+  sizePrices:{small:{type:Number,min:0},medium:{type:Number,min:0},large:{type:Number,min:0}},
+  weightPrices:{gm500:{type:Number,min:0},kg1:{type:Number,min:0},kg15:{type:Number,min:0},kg2:{type:Number,min:0}},
+  cakeMessageEnabled:{type:Boolean,default:false},cakeMessageCharge:{type:Number,min:0,default:0},customWeightEnabled:{type:Boolean,default:false},
+  customizationGroups:[{name:String,type:{type:String,enum:['SINGLE','MULTIPLE']},required:Boolean,minSelect:Number,maxSelect:Number,options:[{name:String,price:Number,active:{type:Boolean,default:true},default:{type:Boolean,default:false}}]}], createdBy:objectId('User')
 },{timestamps:true}));
 
 const OutletProduct = models.OutletProduct || model('OutletProduct', new Schema({

@@ -1,6 +1,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
+const multer = require('multer');
+const { v2: cloudinary } = require('cloudinary');
 const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
 const { requireAuth, allowRoles } = require('../middleware/auth');
@@ -12,8 +14,18 @@ const {
 const settings = require('../services/settingsService');
 const orderService = require('../services/orderService');
 const invoiceService = require('../services/invoiceService');
+const { buildVariantFields, serializeVariantFields } = require('../utils/productVariants');
 
 const r = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (_req,file,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) });
+async function uploadProductImage(file){
+  if(!file) return null;
+  if(!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) throw new AppError('Cloudinary configuration is required for image upload',503,'IMAGE_STORAGE_NOT_CONFIGURED');
+  cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});
+  const data=`data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+  const result=await cloudinary.uploader.upload(data,{folder:'mr-breado/products',resource_type:'image'});
+  return {url:result.secure_url,publicId:result.public_id,alt:file.originalname};
+}
 r.use('/admin', requireAuth, allowRoles('ADMIN'));
 
 const imageUrl = (value) => {
@@ -36,7 +48,8 @@ const normalizeProduct = (p) => p ? ({
   id: String(p._id), productId: String(p._id), title: p.name,
   price: p.basePrice, effectivePrice: p.offerPrice || p.basePrice,
   image: p.images?.[0]?.url || '', imageUrl: p.images?.[0]?.url || '',
-  categoryName: p.categoryId?.name || '', isAvailable: p.active,
+  categoryName: p.categoryId?.name || '', categoryId: p.categoryId?._id || p.categoryId, isAvailable: p.active,
+  ...serializeVariantFields(p),
 }) : null;
 const normalizeOrder = (o) => o ? ({
   ...o,
@@ -69,6 +82,34 @@ async function dashboardData() {
 }
 
 r.get(['/admin/head-office/dashboard','/admin/dashboard/overview','/admin/business/dashboard'], ah(async(req,res)=>ok(res,await dashboardData())));
+
+async function primaryOutletHandler(req,res){
+  const outlet=await Outlet.findOne({primary:true}).lean() || await Outlet.findOne({active:true}).sort({createdAt:1}).lean();
+  return ok(res,normalizeOutlet(outlet),'Primary outlet fetched');
+}
+r.get(['/admin/mr-breado/restaurant','/admin/mr-breado/store','/admin/primary-outlet'],ah(primaryOutletHandler));
+
+async function resolveCategory(body){
+  let category=null;
+  if(body.categoryId||body.category_id) category=await Category.findById(body.categoryId||body.category_id);
+  if(!category&&(body.categoryName||body.category_name||body.category)) category=await Category.findOne({name:new RegExp(`^${String(body.categoryName||body.category_name||body.category).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,'i')});
+  if(!category||!category.active) throw new AppError('Select an active Admin category',400,'INVALID_CATEGORY');
+  return category;
+}
+async function compatibilityProductPayload(body,existing={}){
+  const category=await resolveCategory(body);
+  const variants=buildVariantFields({...existing,...body},category);
+  const images=Array.isArray(body.images)?body.images.map(x=>typeof x==='string'?{url:x}:x).filter(x=>x?.url):(existing.images||[]);
+  return {...body,name:body.name||body.title||existing.name,categoryId:category._id,images,...variants};
+}
+r.route('/admin/mr-breado/products')
+ .get(ah(async(req,res)=>ok(res,(await Product.find().populate('categoryId').sort({createdAt:-1}).lean()).map(normalizeProduct))))
+ .post(upload.single('image'),ah(async(req,res)=>{const body={...req.body};const uploaded=await uploadProductImage(req.file);if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body);const product=await Product.create({...payload,slug:req.body.slug||`${String(payload.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-')}-${require('nanoid').nanoid(5)}`,createdBy:req.user.id});ok(res,normalizeProduct(await Product.findById(product._id).populate('categoryId').lean()),'Product created',201)}));
+r.route('/admin/mr-breado/products/:id')
+ .get(ah(async(req,res)=>{const p=await Product.findById(req.params.id).populate('categoryId').lean();if(!p)throw new AppError('Product not found',404);ok(res,normalizeProduct(p))}))
+ .put(upload.single('image'),ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const body={...req.body};const uploaded=await uploadProductImage(req.file);if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body,existing);const p=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId').lean();ok(res,normalizeProduct(p),'Product updated')}))
+ .delete(ah(async(req,res)=>{await Product.findByIdAndUpdate(req.params.id,{$set:{active:false}});ok(res,null,'Product disabled')}));
+r.patch('/admin/mr-breado/products/:id/availability',ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:req.body.isAvailable??req.body.available??true}},{new:true}).populate('categoryId').lean()))));
 r.get('/admin/dashboard/recent-orders', ah(async(req,res)=>ok(res,(await Order.find().populate('customerId outletId riderId').sort({createdAt:-1}).limit(10).lean()).map(normalizeOrder))));
 r.get('/admin/dashboard/revenue', ah(async(req,res)=>ok(res,{items:await Order.aggregate([{$match:{status:'DELIVERED'}},{$group:{_id:{$dateToString:{format:'%Y-%m-%d',date:'$deliveredAt'}},revenue:{$sum:'$total'},orders:{$sum:1}}},{$sort:{_id:1}},{$limit:30}])})));
 r.get('/admin/dashboard/payments', ah(async(req,res)=>ok(res,await Payment.aggregate([{$group:{_id:'$status',amount:{$sum:'$amount'},count:{$sum:1}}}]))));

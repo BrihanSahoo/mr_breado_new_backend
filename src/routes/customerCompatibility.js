@@ -12,6 +12,7 @@ const paymentService = require('../services/paymentService');
 const invoiceService = require('../services/invoiceService');
 const { haversineKm, deliveryCharge } = require('../utils/geo');
 const { AppError } = require('../utils/errors');
+const { serializeVariantFields } = require('../utils/productVariants');
 const { findOneCompat, resolveObjectId, findEmbeddedByCompatId } = require('../utils/compatId');
 
 const activeOutlet = { active: true, open: true };
@@ -57,6 +58,7 @@ async function menu(outletId, query = {}) {
     ].includes(category))
     .map((row) => ({
       ...row.productId,
+      ...serializeVariantFields(row.productId),
       outletProductId: row._id,
       outletId: row.outletId._id,
       restaurantId: row.outletId.legacyId,
@@ -204,9 +206,22 @@ r.post('/cart/items', ah(async (req, res) => {
   let cart = await Cart.findOne({ customerId: req.user.id });
   if (cart && String(cart.outletId) !== String(outlet._id)) throw new AppError('Cart has items from a different outlet. Clear cart first.', 409);
   if (!cart) cart = new Cart({ customerId: req.user.id, outletId: outlet._id, items: [] });
-  const existing = cart.items.find((item) => String(item.productId) === String(product._id));
+  const selectedLabel = text(req.body.selectedSize ?? req.body.selected_size ?? req.body.selectedWeight ?? req.body.selected_weight);
+  const requestedOptionIds = Array.isArray(req.body.customizationOptionIds ?? req.body.customization_option_ids) ? (req.body.customizationOptionIds ?? req.body.customization_option_ids).map(String) : [];
+  const selectedCustomizations = [];
+  for (const group of product.customizationGroups || []) {
+    for (const option of group.options || []) {
+      const matchesId = requestedOptionIds.includes(String(option._id));
+      const matchesLabel = selectedLabel && text(option.name).toLowerCase() === selectedLabel.toLowerCase();
+      if (matchesId || matchesLabel) selectedCustomizations.push({ groupName: group.name, optionName: option.name, price: Number(option.price || 0) });
+    }
+  }
+  if (selectedLabel && !selectedCustomizations.length) throw new AppError('Selected food size or weight is not available', 400, 'INVALID_VARIANT');
+  const cakeMessage = text(req.body.cakeMessage ?? req.body.cake_message);
+  if (cakeMessage && product.cakeMessageEnabled) selectedCustomizations.push({ groupName: 'Cake Message Text', optionName: cakeMessage, price: Number(product.cakeMessageCharge || 0) });
+  const existing = cart.items.find((item) => String(item.productId) === String(product._id) && JSON.stringify(item.customizations || []) === JSON.stringify(selectedCustomizations));
   if (existing) existing.quantity += quantity;
-  else cart.items.push({ productId: product._id, quantity, customizations: req.body.customizations || [] });
+  else cart.items.push({ productId: product._id, quantity, customizations: selectedCustomizations });
   await cart.save(); ok(res, await cartForUser(req.user.id), 'Cart updated', 201);
 }));
 r.put('/cart/items/:id', ah(async (req, res) => {
