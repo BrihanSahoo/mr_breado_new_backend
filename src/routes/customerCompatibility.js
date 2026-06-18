@@ -24,7 +24,8 @@ const text = (v) => String(v ?? '').trim();
 const imageUrl = (v) => { if (!v) return ''; if (typeof v === 'string') return v; if (Array.isArray(v)) return imageUrl(v[0]); return imageUrl(v.secure_url || v.secureUrl || v.url || v.src || v.path || v.image || v.imageUrl); };
 const categoryOut = (c) => ({ ...c, id: c.legacyId ?? String(c._id), categoryId: c.legacyId ?? String(c._id), title: c.name, image: imageUrl(c.image), imageUrl: imageUrl(c.image), icon: imageUrl(c.image), status: c.active ? 'ACTIVE' : 'INACTIVE' });
 const bannerOut = (b) => ({ ...b, id: b.legacyId ?? String(b._id), image: imageUrl(b.image), imageUrl: imageUrl(b.image), banner: imageUrl(b.image), couponCode: b.actionType === 'COUPON' ? b.actionValue : undefined });
-const offerOut = (o) => ({ ...o, id: o.legacyId ?? String(o._id), image: imageUrl(o.image), imageUrl: imageUrl(o.image), banner: imageUrl(o.image), couponCode: o.code || '', code: o.code || '' });
+const offerOut = (o) => { const image=imageUrl(o.image ?? o.banner ?? o.imageUrl ?? o.image_url); const code=text(o.code ?? o.couponCode ?? o.coupon_code).toUpperCase(); const type=text(o.type ?? o.discountType ?? o.discount_type).toUpperCase(); return ({ ...o, id: o.legacyId ?? String(o._id), image, imageUrl:image, image_url:image, banner:image, bannerImage:image, couponCode:code, coupon_code:code, code, discountType:type, discount_type:type, discountValue:Number(o.value ?? o.discountValue ?? o.discount_value ?? 0), discount_value:Number(o.value ?? o.discountValue ?? o.discount_value ?? 0), subtitle:o.subtitle ?? '', activeNow:o.active !== false }); };
+const outletOut = (o) => { if(!o) return o; const logo=imageUrl(o.logo); const banner=imageUrl(o.coverImage ?? o.cover_image ?? o.bannerImage ?? o.banner); const address=[o.address?.line1,o.address?.line2,o.address?.area,o.address?.landmark,o.address?.city,o.address?.state,o.address?.pincode].filter(Boolean).join(', '); return ({...o,id:o.legacyId ?? String(o._id),outletId:o.legacyId ?? String(o._id),restaurantId:o.legacyId ?? String(o._id),outletName:o.name,restaurantName:o.name,logo:logo,logoImage:logo,profileImage:logo,image:banner||logo,imageUrl:banner||logo,banner:banner,bannerImage:banner,coverImage:banner,address:address,addressText:address,fullAddress:address,latitude:o.location?.coordinates?.[1]??0,longitude:o.location?.coordinates?.[0]??0,deliveryRadiusKm:Number(o.deliveryRadiusKm||0),serviceRadiusKm:Number(o.deliveryRadiusKm||0),radiusKm:Number(o.deliveryRadiusKm||0)}); };
 
 async function nearestOutlet(lat, lng) {
   if (Number.isFinite(lat) && Number.isFinite(lng)) {
@@ -198,11 +199,11 @@ r.get('/home', ah(async (req, res) => {
   const [categories, banners, offers, outlets, products] = await Promise.all([
     Category.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean(),
     Banner.find({ active: true }).sort({ sortOrder: 1 }).lean(),
-    Offer.find({ active: true }).lean(),
+    Promise.all([Offer.find({ active: true }).lean(), require('../models').Coupon.find({ active: true }).lean()]),
     Outlet.find(activeOutlet).sort({ primary: -1, createdAt: 1 }).limit(30).lean(),
     outlet ? menu(outlet._id, req.query) : []
   ]);
-  ok(res, { banners:banners.map(bannerOut), categories:categories.map(categoryOut), offers:offers.map(offerOut), outlets, restaurants: outlets, products, items: products, featured_foods: products, popular_foods: products, nearestOutlet: outlet });
+  const offerRows=[...(offers?.[0]||[]),...(offers?.[1]||[])]; const normalizedOutlets=outlets.map(outletOut); ok(res, { banners:banners.map(bannerOut), categories:categories.map(categoryOut), offers:offerRows.map(offerOut), coupons:offerRows.map(offerOut).filter(x=>x.code), outlets:normalizedOutlets, restaurants:normalizedOutlets, products, items:products, featured_foods:products, popular_foods:products, nearestOutlet:outletOut(outlet) });
 }));
 r.get('/products', ah(async (req, res) => {
   const requested = req.query.outletId ?? req.query.outlet_id ?? req.query.restaurantId ?? req.query.restaurant_id ?? req.query.store;
@@ -212,18 +213,18 @@ r.get('/products', ah(async (req, res) => {
 r.get('/outlets/nearest', ah(async (req, res) => {
   const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
   if (!outlet) throw new AppError('No serviceable outlet found', 404);
-  ok(res, outlet);
+  ok(res, outletOut(outlet));
 }));
 r.get('/menu/nearest', ah(async (req, res) => {
   const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
   if (!outlet) throw new AppError('No serviceable outlet found', 404);
   const products = await menu(outlet._id, req.query);
-  ok(res, { outlet, products, items: products });
+  ok(res, { outlet:outletOut(outlet), products, items: products });
 }));
 r.get('/outlets/:id/menu', ah(async (req, res) => {
   const outlet = await resolveOutlet(req.params.id);
   if (!outlet) throw new AppError('Outlet not found', 404);
-  ok(res, { outlet, products: await menu(outlet._id, req.query), items: await menu(outlet._id, req.query) });
+  { const items=await menu(outlet._id, req.query); ok(res, { outlet:outletOut(outlet), products:items, items }); }
 }));
 r.get('/outlets/:id/contact', ah(async (req, res) => {
   const outlet = await resolveOutlet(req.params.id);
