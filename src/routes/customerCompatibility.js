@@ -14,6 +14,7 @@ const { haversineKm, deliveryCharge } = require('../utils/geo');
 const { AppError } = require('../utils/errors');
 const { serializeVariantFields } = require('../utils/productVariants');
 const { findOneCompat, resolveObjectId, findEmbeddedByCompatId } = require('../utils/compatId');
+const deliveryService = require('../services/deliveryService');
 
 const activeOutlet = { active: true, open: true };
 const numberOrNull = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
@@ -230,45 +231,46 @@ r.get('/outlets/:id/contact', ah(async (req, res) => {
   ok(res, { outletId: outlet.legacyId, name: outlet.name, managerName: outlet.managerName, phone: outlet.managerPhone, email: outlet.email, address: outlet.address, latitude: outlet.location.coordinates[1], longitude: outlet.location.coordinates[0] });
 }));
 
+r.post(['/delivery/check-pincode','/serviceability/check-pincode','/addresses/check-serviceability'], ah(async(req,res)=>{
+  const source={...req.query,...req.body};
+  const pincode=deliveryService.cleanPincode(source.pincode ?? source.zipcode);
+  if(!/^\d{6}$/.test(pincode)) throw new AppError('Enter a valid 6 digit pincode',400,'INVALID_PINCODE');
+  const result=await deliveryService.checkServiceability({pincode,address:source.address ?? source.line1,city:source.city,state:source.state,latitude:source.latitude ?? source.lat,longitude:source.longitude ?? source.lng,outletId:source.outletId ?? source.restaurantId});
+  ok(res,{...result,pincode});
+}));
+
 r.use(requireAuth, allowRoles('CUSTOMER', 'ADMIN'));
 
 // Addresses with embedded numeric compatibility IDs.
 r.get('/user/addresses', ah(async (req, res) => ok(res, (await User.findById(req.user.id).lean())?.addresses || [])));
 r.post('/user/addresses', ah(async (req, res) => {
   const user = await User.findById(req.user.id);
+  if (!user) throw new AppError('User not found', 404);
+  const pincode=req.body.pincode ?? req.body.zipcode;
+  const line1=req.body.line1 ?? req.body.address ?? req.body.addressLine ?? req.body.address_line;
+  const validation=await deliveryService.checkServiceability({latitude:req.body.latitude,longitude:req.body.longitude,pincode,address:line1,city:req.body.city,state:req.body.state});
   if (req.body.isDefault ?? req.body.is_default) user.addresses.forEach((a) => { a.isDefault = false; });
   user.addresses.push({
-    label: req.body.label ?? req.body.type,
-    line1: req.body.line1 ?? req.body.address ?? req.body.addressLine ?? req.body.address_line,
-    line2: req.body.line2,
-    area: req.body.area,
-    city: req.body.city,
-    state: req.body.state,
-    pincode: req.body.pincode ?? req.body.zipcode,
-    landmark: req.body.landmark,
-    latitude: req.body.latitude,
-    longitude: req.body.longitude,
-    isDefault: Boolean(req.body.isDefault ?? req.body.is_default)
+    label: req.body.label ?? req.body.type, line1, line2: req.body.line2, area: req.body.area, city: req.body.city, state: req.body.state,
+    pincode: validation.pincode || pincode, landmark: req.body.landmark, latitude: validation.latitude, longitude: validation.longitude,
+    isDefault: Boolean(req.body.isDefault ?? req.body.is_default), serviceable: validation.serviceable, serviceabilityCheckedAt:new Date(),
+    nearestOutletId:validation.nearestOutletId, distanceKm:validation.distanceKm, allowedRadiusKm:validation.allowedRadiusKm, validationMessage:validation.message
   });
   await user.save();
-  ok(res, user.addresses.at(-1), 'Address added', 201);
+  ok(res, {...user.addresses.at(-1).toObject(), serviceability:validation}, validation.message, 201);
 }));
 r.put('/user/addresses/:id', ah(async (req, res) => {
   const { user, address } = await addressForUser(req.user.id, req.params.id);
+  const line1=req.body.line1 ?? req.body.address ?? req.body.addressLine ?? req.body.address_line ?? address.line1;
+  const pincode=req.body.pincode ?? req.body.zipcode ?? address.pincode;
+  const validation=await deliveryService.checkServiceability({latitude:req.body.latitude ?? address.latitude,longitude:req.body.longitude ?? address.longitude,pincode,address:line1,city:req.body.city ?? address.city,state:req.body.state ?? address.state});
   Object.assign(address, {
-    label: req.body.label ?? req.body.type ?? address.label,
-    line1: req.body.line1 ?? req.body.address ?? req.body.addressLine ?? req.body.address_line ?? address.line1,
-    line2: req.body.line2 ?? address.line2,
-    area: req.body.area ?? address.area,
-    city: req.body.city ?? address.city,
-    state: req.body.state ?? address.state,
-    pincode: req.body.pincode ?? req.body.zipcode ?? address.pincode,
-    landmark: req.body.landmark ?? address.landmark,
-    latitude: req.body.latitude ?? address.latitude,
-    longitude: req.body.longitude ?? address.longitude
+    label: req.body.label ?? req.body.type ?? address.label, line1, line2: req.body.line2 ?? address.line2, area: req.body.area ?? address.area,
+    city: req.body.city ?? address.city, state: req.body.state ?? address.state, pincode: validation.pincode || pincode, landmark: req.body.landmark ?? address.landmark,
+    latitude: validation.latitude, longitude: validation.longitude, serviceable:validation.serviceable, serviceabilityCheckedAt:new Date(), nearestOutletId:validation.nearestOutletId, distanceKm:validation.distanceKm, allowedRadiusKm:validation.allowedRadiusKm, validationMessage:validation.message
   });
   if (req.body.isDefault ?? req.body.is_default) user.addresses.forEach((a) => { a.isDefault = a._id.equals(address._id); });
-  await user.save(); ok(res, address, 'Address updated');
+  await user.save(); ok(res, {...address.toObject(),serviceability:validation}, validation.message);
 }));
 r.delete('/user/addresses/:id', ah(async (req, res) => {
   const { user, address } = await addressForUser(req.user.id, req.params.id); address.deleteOne(); await user.save(); ok(res, null, 'Address deleted');
@@ -341,17 +343,14 @@ r.post('/checkout/summary', ah(async (req, res) => {
 async function deliveryValidation(req, res) {
   const source = { ...req.query, ...req.body };
   const cart = await Cart.findOne({ customerId: req.user.id });
-  const outlet = source.outletId || source.restaurantId ? await resolveOutlet(source.outletId ?? source.restaurantId) : cart ? await Outlet.findById(cart.outletId) : await nearestOutlet(readLat(source), readLng(source));
-  if (!outlet) throw new AppError('Outlet not found', 404);
-  let lat = readLat(source), lng = readLng(source);
-  if ((!Number.isFinite(lat) || !Number.isFinite(lng)) && (source.addressId ?? source.address_id)) {
-    const result = await addressForUser(req.user.id, source.addressId ?? source.address_id); lat = Number(result.address.latitude); lng = Number(result.address.longitude);
-  }
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new AppError('Latitude and longitude are required');
-  const [outletLng, outletLat] = outlet.location.coordinates;
-  const distanceKm = Number(haversineKm(outletLat, outletLng, lat, lng).toFixed(2));
-  const charge = deliveryCharge(distanceKm, outlet.deliverySettings || {});
-  ok(res, { outletId: outlet.legacyId, distanceKm, deliveryRadiusKm: outlet.deliveryRadiusKm, serviceable: distanceKm <= outlet.deliveryRadiusKm, deliverable: distanceKm <= outlet.deliveryRadiusKm, canDeliver: distanceKm <= outlet.deliveryRadiusKm, deliveryCharge: charge });
+  let address = null;
+  if (source.addressId ?? source.address_id) address = (await addressForUser(req.user.id, source.addressId ?? source.address_id)).address;
+  const result=await deliveryService.checkServiceability({
+    outletId: source.outletId ?? source.restaurantId ?? cart?.outletId,
+    latitude: readLat(source) ?? address?.latitude, longitude: readLng(source) ?? address?.longitude,
+    pincode: source.pincode ?? source.zipcode ?? address?.pincode, address: source.address ?? address?.line1, city:source.city ?? address?.city, state:source.state ?? address?.state
+  });
+  ok(res,result);
 }
 r.post(['/delivery/validate', '/orders/validate-delivery'], ah(deliveryValidation));
 

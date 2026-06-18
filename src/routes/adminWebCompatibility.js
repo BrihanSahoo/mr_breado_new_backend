@@ -15,6 +15,7 @@ const settings = require('../services/settingsService');
 const orderService = require('../services/orderService');
 const invoiceService = require('../services/invoiceService');
 const { buildVariantFields, serializeVariantFields } = require('../utils/productVariants');
+const deliveryService = require('../services/deliveryService');
 
 const r = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (_req,file,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) });
@@ -142,7 +143,19 @@ r.put('/admin/outlets/:id', ah(async(req,res)=>{
 }));
 r.get('/admin/outlets/:id/gstin', ah(async(req,res)=>{const o=await Outlet.findById(req.params.id).lean();if(!o)throw new AppError('Outlet not found',404);ok(res,{gstin:o.gstin,invoiceLegalName:o.name,invoiceAddress:[o.address?.line1,o.address?.area,o.address?.city,o.address?.state,o.address?.pincode].filter(Boolean).join(', ')})}));
 r.put('/admin/outlets/:id/gstin', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{gstin:req.body.gstin,name:req.body.invoiceLegalName||undefined,'address.line1':req.body.invoiceAddress||undefined}},{new:true}).lean()))));
-r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{location:{type:'Point',coordinates:[Number(req.body.longitude),Number(req.body.latitude)]},deliveryRadiusKm:Number(req.body.serviceRadiusKm??req.body.deliveryRadiusKm),address:{line1:req.body.address,city:req.body.city,pincode:req.body.pincode}}},{new:true}).lean()))));
+r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>{
+  const radius=Number(req.body.serviceRadiusKm ?? req.body.deliveryRadiusKm ?? req.body.delivery_radius_km ?? req.body.radiusKm ?? req.body.radius_km);
+  if(!Number.isFinite(radius)||radius<=0||radius>100) throw new AppError('Delivery radius must be greater than 0 and at most 100 km',400,'INVALID_DELIVERY_RADIUS');
+  const coords=await deliveryService.normalizeCoordinates({latitude:req.body.latitude,longitude:req.body.longitude,address:req.body.address,pincode:req.body.pincode,city:req.body.city,state:req.body.state});
+  const set={location:{type:'Point',coordinates:[coords.longitude,coords.latitude]},deliveryRadiusKm:radius};
+  if(req.body.address||coords.formattedAddress)set['address.line1']=req.body.address||coords.formattedAddress;
+  if(req.body.city)set['address.city']=req.body.city;
+  if(req.body.state)set['address.state']=req.body.state;
+  if(req.body.pincode||coords.pincode)set['address.pincode']=req.body.pincode||coords.pincode;
+  const out=await Outlet.findByIdAndUpdate(req.params.id,{$set:set},{new:true,runValidators:true}).lean();
+  if(!out)throw new AppError('Outlet not found',404);
+  ok(res,{...normalizeOutlet(out),coordinatesCorrected:Boolean(coords.suppliedCoordinatesSwapped)},'Outlet location updated');
+}));
 r.post('/admin/outlets/:id/branding', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{logo:imageUrl(req.body.profileImage||req.body.logo),coverImage:imageUrl(req.body.bannerImage||req.body.coverImage),managerPhone:req.body.phone,email:req.body.email,'address.line1':req.body.address}},{new:true}).lean()))));
 r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{const password=String(req.body.password||'');if(password.length<8)throw new AppError('Password must contain at least 8 characters');let user=await User.findOne({role:'SELLER',$or:[{email:req.body.email?.toLowerCase()},{phone:req.body.phone}].filter(x=>Object.values(x)[0])}).select('+passwordHash');if(!user)user=new User({name:req.body.name||req.body.managerName||'Outlet Manager',email:req.body.email?.toLowerCase(),phone:req.body.phone,role:'SELLER',passwordHash:await bcrypt.hash(password,12),assignedOutletIds:[req.params.id]});else{user.passwordHash=await bcrypt.hash(password,12);user.assignedOutletIds=[req.params.id];user.active=true;}await user.save();ok(res,{id:user._id,email:user.email,phone:user.phone,assignedOutletIds:user.assignedOutletIds},'Outlet credentials saved')}));
 r.get('/admin/outlets/:id/orders', ah(async(req,res)=>ok(res,(await Order.find({outletId:req.params.id}).populate('customerId outletId riderId').sort({createdAt:-1}).lean()).map(normalizeOrder))));
