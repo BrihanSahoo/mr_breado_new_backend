@@ -16,6 +16,33 @@ const {
 
 r.use(requireAuth, allowRoles('SELLER', 'ADMIN'));
 
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+function validGstin(value) { return GSTIN_RE.test(String(value || '').trim().toUpperCase()); }
+async function requireBusinessReady(outletId) {
+  const outlet = await Outlet.findById(outletId).lean();
+  if (!outlet) throw new AppError('Outlet not found', 404, 'OUTLET_NOT_FOUND');
+  if (!validGstin(outlet.gstin)) throw new AppError('GSTIN is not configured for this outlet. Contact the administrator.', 403, 'OUTLET_GSTIN_REQUIRED');
+  if (outlet.active === false) throw new AppError('Outlet is inactive. Contact the administrator.', 403, 'OUTLET_INACTIVE');
+  return outlet;
+}
+function outletDto(o) {
+  if (!o) return o;
+  const raw = typeof o.toObject === 'function' ? o.toObject() : o;
+  const address = [raw.address?.line1, raw.address?.line2, raw.address?.area, raw.address?.city, raw.address?.state, raw.address?.pincode].filter(Boolean).join(', ');
+  const logo = raw.logo?.url || '';
+  const banner = raw.coverImage?.url || '';
+  return { ...raw, id: raw.legacyId ?? String(raw._id), mongoId: String(raw._id), outletId: String(raw._id), address, logo, logoImage: logo, banner, bannerImage: banner, gstinRequired: true, businessReady: validGstin(raw.gstin) && raw.active !== false, verificationStatus: 'APPROVED', visibilityStatus: raw.active === false ? 'HIDDEN' : 'VISIBLE', status: raw.open ? 'OPEN' : 'CLOSED' };
+}
+function orderDto(o) {
+  const raw = typeof o?.toObject === 'function' ? o.toObject() : o;
+  if (!raw) return raw;
+  const customer = raw.customerId && typeof raw.customerId === 'object' ? raw.customerId : {};
+  const rider = raw.riderId && typeof raw.riderId === 'object' ? raw.riderId : {};
+  const outlet = raw.outletId && typeof raw.outletId === 'object' ? raw.outletId : {};
+  return { ...raw, id: raw.legacyId ?? String(raw._id), mongoId: String(raw._id), orderNumber: raw.slug, customer, customerName: customer.name || 'Customer', customerMobile: customer.phone || '', customerEmail: customer.email || '', rider, outlet: outletDto(outlet), grandTotal: Number(raw.total || 0), deliveryAddress: raw.address, orderType: raw.fulfilmentType, paymentType: raw.paymentMethod };
+}
+
+
 function outletIdsFor(user) {
   return (user.assignedOutletIds || []).map((id) => String(id));
 }
@@ -48,7 +75,10 @@ function productDto(row) {
   const price = Number(row.offerPriceOverride ?? row.priceOverride ?? p.offerPrice ?? p.basePrice ?? 0);
   return {
     ...row.toObject?.() || row,
-    productId: p,
+    id: p.legacyId ?? String(p._id || ''),
+    productId: p.legacyId ?? String(p._id || ''),
+    mongoProductId: String(p._id || ''),
+    product: p,
     name: p.name,
     description: p.description,
     image: p.images?.[0]?.url || '',
@@ -74,7 +104,7 @@ function orderQuery(req, outletId) {
 
 r.get(['/seller/restaurant', '/outlet-manager/me', '/outlet-manager/outlet'], ah(async (req, res) => {
   const id = await currentOutlet(req);
-  ok(res, await Outlet.findById(id).lean());
+  ok(res, outletDto(await Outlet.findById(id).lean()));
 }));
 
 r.put('/seller/restaurant', ah(async (req, res) => {
@@ -95,6 +125,7 @@ r.patch('/seller/restaurant/status', ah(async (req, res) => {
 
 r.get(['/seller/products','/outlet-manager/products'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
   const filter = { outletId };
   if (req.query.available !== undefined) filter.available = String(req.query.available) === 'true';
   const rows = await OutletProduct.find(filter).populate('productId').sort({ updatedAt: -1 });
@@ -137,6 +168,20 @@ r.patch('/seller/products/:id/availability', ah(async (req, res) => {
 
 r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
+  if (Array.isArray(req.body.items) && req.body.items.length) {
+    const results = [];
+    for (const item of req.body.items) {
+      const productId = await resolveObjectId(Product, item.productId);
+      if (!productId) throw new AppError('Product not found', 404);
+      const after = Number(item.stockQuantity ?? item.stock ?? 0);
+      if (!Number.isFinite(after) || after < 0) throw new AppError('Invalid stock quantity', 400);
+      const row = await OutletProduct.findOneAndUpdate({ outletId, productId }, { $set: { stockQuantity: after, available: after > 0 } }, { new: true }).populate('productId');
+      if (!row) throw new AppError('Product is not assigned to this outlet', 404);
+      results.push(productDto(row));
+    }
+    return ok(res, { items: results, products: results }, 'Daily stock updated');
+  }
   const productId = await resolveObjectId(Product, req.body.productId);
   if (!productId) throw new AppError('Product not found', 404);
   const session = await mongoose.startSession();
@@ -160,6 +205,7 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
 
 r.get(['/seller/orders','/outlet-manager/orders'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(200, Math.max(1, Number(req.query.per_page || req.query.limit || 80)));
   const q = orderQuery(req, outletId);
@@ -167,7 +213,8 @@ r.get(['/seller/orders','/outlet-manager/orders'], ah(async (req, res) => {
     Order.find(q).populate('customerId riderId outletId').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
     Order.countDocuments(q),
   ]);
-  ok(res, { items, orders: items, content: items, total, page, per_page: limit });
+  const data = items.map(orderDto);
+  ok(res, { items: data, orders: data, content: data, total, page, per_page: limit });
 }));
 
 r.get('/seller/orders/export.csv', ah(async (req, res) => {
@@ -183,12 +230,13 @@ r.get('/seller/orders/export.csv', ah(async (req, res) => {
 r.get('/seller/orders/:id', ah(async (req, res) => {
   const order = await orderForUser(req);
   await order.populate('customerId riderId outletId');
-  ok(res, order);
+  ok(res, orderDto(order));
 }));
 
 for (const [suffix, status] of [['accept','ACCEPTED'],['preparing','PREPARING'],['ready','READY'],['reject','REJECTED'],['cancel','CANCELLED']]) {
   r.post(`/seller/orders/:id/${suffix}`, ah(async (req, res) => {
     const order = await orderForUser(req);
+    await requireBusinessReady(order.outletId);
     const updated = await orderService.changeStatus(order, req.user, status, req.body.reason || req.body.note, req.headers['idempotency-key']);
     ok(res, updated, `Order ${suffix}ed`);
   }));
@@ -209,6 +257,7 @@ r.post('/seller/orders/:id/invoice/send-to-customer', ah(async (req, res) => {
 
 r.post('/outlet-manager/offline-sales', ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
   const key = req.headers['idempotency-key'] || req.body.idempotencyKey;
   if (!key) throw new AppError('Idempotency-Key is required', 400, 'IDEMPOTENCY_KEY_REQUIRED');
   const existing = await OfflineSale.findOne({ idempotencyKey: key });
@@ -246,6 +295,7 @@ r.post('/outlet-manager/offline-sales', ah(async (req, res) => {
 
 r.get('/outlet-manager/dashboard', ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
   const start = req.query.from ? new Date(req.query.from) : new Date(new Date().setHours(0,0,0,0));
   const end = req.query.to ? new Date(req.query.to) : new Date();
   const [orders, inventory, offlineSales] = await Promise.all([
@@ -268,6 +318,12 @@ r.get('/outlet-manager/dashboard', ah(async (req, res) => {
     lowStockCount: inventory.filter((x) => x.stockQuantity <= x.lowStockThreshold).length,
     outOfStockCount: inventory.filter((x) => x.stockQuantity <= 0).length,
     inventory: inventory.map(productDto),
+    stock: inventory.map(productDto),
+    orderCount: orders.length,
+    orders: orders.length,
+    totalSales: onlineRevenue + offlineRevenue,
+    availableProducts: inventory.filter((x) => x.available && x.enabled && x.stockQuantity > 0).length,
+    lowStock: inventory.filter((x) => x.stockQuantity <= x.lowStockThreshold).length,
     recentOrders: orders.slice(0, 20),
   });
 }));
@@ -279,6 +335,7 @@ r.get('/outlet-manager/stock-ledger', ah(async (req, res) => {
 
 r.post(['/outlet-manager/close-day','/outlet-manager/day-close','/outlet-manager/end-of-day'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
+  await requireBusinessReady(outletId);
   const businessDate = req.body.businessDate || req.body.date || new Date().toISOString().slice(0,10);
   const inventory = await OutletProduct.find({ outletId }).lean();
   const start = new Date(`${businessDate}T00:00:00.000Z`);
