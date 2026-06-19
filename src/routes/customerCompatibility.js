@@ -3,7 +3,7 @@ const ah = require('../utils/asyncHandler');
 const { ok, embeddedLegacyId } = require('../utils/respond');
 const { requireAuth, allowRoles } = require('../middleware/auth');
 const {
-  User, Outlet, Category, Banner, Offer, Product, OutletProduct, Cart, Order,
+  User, Outlet, Category, Brand, Banner, BiteStory, Offer, Coupon, Product, OutletProduct, Cart, Order,
   OrderEvent, Review, RiderLocation, Payment, Notification, SupportTicket
 } = require('../models');
 const settings = require('../services/settingsService');
@@ -195,15 +195,30 @@ async function resolveCartOutlet(productId, requestedOutlet) {
 // Public compatibility endpoints used by the existing customer app.
 r.get('/platform/settings', ah(async (req, res) => { const pub=await settings.publicSettings(); const f=await settings.getBusinessFeatures(); ok(res,{...pub,razorpayConfigured:Boolean(pub.payment?.onlinePaymentConfigured),onlinePaymentConfigured:Boolean(pub.payment?.onlinePaymentConfigured),razorpayKeyId:pub.razorpayKeyId||pub.payment?.razorpayKeyId||'',onlinePaymentEnabled:f.feature_toggles.onlinePayment,codEnabled:f.feature_toggles.cod,takeawayEnabled:f.feature_toggles.takeaway,mrBreadoTakeawayEnabled:f.feature_toggles.takeaway,takeawayAdvancePercentage:f.takeaway.advanceValue,takeawayBookingFeePercent:f.takeaway.advanceValue,featureToggles:f.feature_toggles,feature_toggles:f.feature_toggles,takeaway:f.takeaway}); }));
 r.get('/home', ah(async (req, res) => {
-  const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
-  const [categories, banners, offers, outlets, products] = await Promise.all([
-    Category.find({ active: true }).sort({ sortOrder: 1, name: 1 }).lean(),
-    Banner.find({ active: true }).sort({ sortOrder: 1 }).lean(),
-    Promise.all([Offer.find({ active: true }).lean(), require('../models').Coupon.find({ active: true }).lean()]),
-    Outlet.find(activeOutlet).sort({ primary: -1, createdAt: 1 }).limit(30).lean(),
-    outlet ? menu(outlet._id, req.query) : []
+  const lat=readLat(req.query), lng=readLng(req.query), now=new Date();
+  const dateFilter={$and:[{$or:[{startAt:null},{startAt:{$exists:false}},{startAt:{$lte:now}}]},{$or:[{endAt:null},{endAt:{$exists:false}},{endAt:{$gte:now}}]}]};
+  let serviceability=null, outlet=null, normalizedOutlets=[];
+  const rawOutlets=await Outlet.find(activeOutlet).sort({primary:-1,createdAt:1}).limit(30).lean();
+  if(Number.isFinite(lat)&&Number.isFinite(lng)){
+    serviceability=await deliveryService.checkServiceability({latitude:lat,longitude:lng});
+    const road=await deliveryService.googleRoadDistances({latitude:lat,longitude:lng},rawOutlets).catch(()=>new Map());
+    normalizedOutlets=rawOutlets.map(o=>{const r=road.get(String(o._id));return outletOut({...o,distanceKm:r?.distanceKm,exactDistanceKm:r?.distanceKm,estimatedTravelMinutes:r?.durationMinutes});}).filter(o=>Number(o.distanceKm)<=Number(o.deliveryRadiusKm||0));
+    if(serviceability?.serviceable) outlet=await Outlet.findById(serviceability.nearestOutletId).lean();
+  } else normalizedOutlets=rawOutlets.map(outletOut);
+  const outletId=outlet?._id;
+  const [categories,banners,brands,offerDocs,coupons,stories,products]=await Promise.all([
+    Category.find({active:true}).sort({sortOrder:1,name:1}).lean(),
+    Banner.find({active:true}).sort({sortOrder:1}).lean(),
+    Brand.find({active:true}).sort({name:1}).lean(),
+    Offer.find({active:true,...dateFilter,...(outletId?{$or:[{outletIds:{$size:0}},{outletIds:outletId}]}:{})}).lean(),
+    Coupon.find({active:true,...dateFilter}).lean(),
+    BiteStory.find({active:true,$and:[{$or:[{startsAt:null},{startsAt:{$exists:false}},{startsAt:{$lte:now}}]},{$or:[{endsAt:null},{endsAt:{$exists:false}},{endsAt:{$gte:now}}]}]}).sort({sortOrder:1,createdAt:-1}).lean(),
+    outlet?menu(outlet._id,req.query):[]
   ]);
-  const offerRows=[...(offers?.[0]||[]),...(offers?.[1]||[])]; const normalizedOutlets=outlets.map(outletOut); ok(res, { banners:banners.map(bannerOut), categories:categories.map(categoryOut), offers:offerRows.map(offerOut), coupons:offerRows.map(offerOut).filter(x=>x.code), outlets:normalizedOutlets, restaurants:normalizedOutlets, products, items:products, featured_foods:products, popular_foods:products, nearestOutlet:outletOut(outlet) });
+  const couponByCode=new Map(coupons.map(c=>[text(c.code).toUpperCase(),c]));
+  const promotions=offerDocs.map(o=>{const n=offerOut(o);const c=couponByCode.get(n.code);return {...n,hasValidCoupon:Boolean(c),exploreEnabled:Boolean(c),coupon:c?offerOut(c):null,outletId:outletId?String(outletId):null};});
+  const nearest=outlet?outletOut({...outlet,distanceKm:serviceability?.distanceKm,exactDistanceKm:serviceability?.distanceKm,estimatedTravelMinutes:serviceability?.estimatedTravelMinutes}):null;
+  ok(res,{banners:banners.map(bannerOut),categories:categories.map(categoryOut),brands:brands.map(b=>({...b,id:String(b._id),image:imageUrl(b.image),imageUrl:imageUrl(b.image),logo:imageUrl(b.image)})),stories:stories.map(s=>{const media=imageUrl(s.media);return {...s,id:String(s._id),mediaUrl:media,thumbnailUrl:media,image:media,imageUrl:media};}),offers:promotions,coupons:coupons.map(offerOut),outlets:normalizedOutlets,restaurants:normalizedOutlets,products,items:products,featured_foods:products,popular_foods:products,nearestOutlet:nearest,serviceability,noOutletAvailable:Boolean(serviceability&&!serviceability.serviceable),message:serviceability?.message||''});
 }));
 r.get('/products', ah(async (req, res) => {
   const requested = req.query.outletId ?? req.query.outlet_id ?? req.query.restaurantId ?? req.query.restaurant_id ?? req.query.store;
@@ -211,9 +226,13 @@ r.get('/products', ah(async (req, res) => {
   ok(res, outlet ? await menu(outlet._id, req.query) : []);
 }));
 r.get('/outlets/nearest', ah(async (req, res) => {
-  const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
-  if (!outlet) throw new AppError('No serviceable outlet found', 404);
-  ok(res, outletOut(outlet));
+  const lat=readLat(req.query),lng=readLng(req.query);
+  if(!Number.isFinite(lat)||!Number.isFinite(lng)) throw new AppError('Current latitude and longitude are required',400,'USER_LOCATION_REQUIRED');
+  const result=await deliveryService.checkServiceability({latitude:lat,longitude:lng});
+  if(!result.serviceable) throw new AppError(result.message,404,result.code);
+  const outlet=await Outlet.findById(result.nearestOutletId).lean();
+  if(!outlet) throw new AppError('No serviceable outlet found',404);
+  ok(res,outletOut({...outlet,distanceKm:result.distanceKm,exactDistanceKm:result.distanceKm,estimatedTravelMinutes:result.estimatedTravelMinutes}));
 }));
 r.get('/menu/nearest', ah(async (req, res) => {
   const outlet = await nearestOutlet(readLat(req.query), readLng(req.query));
