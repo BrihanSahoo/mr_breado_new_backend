@@ -199,6 +199,11 @@ async function dashboard(req, rider) {
     RiderEarning.aggregate([{ $match: { riderId: rider._id } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     cashSummary(rider),
   ]);
+  const [verificationRequest, pendingPayoutAgg, paidPayoutAgg] = await Promise.all([
+    VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' }).sort({ createdAt: -1 }).lean(),
+    RiderEarning.aggregate([{ $match: { riderId: rider._id, status: 'PENDING' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+    RiderEarning.aggregate([{ $match: { riderId: rider._id, status: 'PAID' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
+  ]);
   return {
     id: Number(rider.legacyId || 0),
     riderId: Number(rider.legacyId || 0),
@@ -212,6 +217,14 @@ async function dashboard(req, rider) {
     rating: Number(rider.riderProfile?.rating || 0),
     verificationStatus: rider.riderProfile?.verificationStatus || 'UNVERIFIED',
     verification_status: rider.riderProfile?.verificationStatus || 'UNVERIFIED',
+    verificationRequest: verificationRequest ? { id: String(verificationRequest._id), status: verificationRequest.status, documents: verificationRequest.documents, createdAt: verificationRequest.createdAt } : null,
+    verificationSubmitted: Boolean(verificationRequest),
+    pendingPayout: Number(pendingPayoutAgg[0]?.total || 0),
+    pending_payout: Number(pendingPayoutAgg[0]?.total || 0),
+    paidEarnings: Number(paidPayoutAgg[0]?.total || 0),
+    paid_earnings: Number(paidPayoutAgg[0]?.total || 0),
+    upiId: rider.riderProfile?.payoutAccount?.upiId || '',
+    upi_id: rider.riderProfile?.payoutAccount?.upiId || '',
     currentOrder: await serializeOrder(current),
     current_order: await serializeOrder(current),
     ...cash,
@@ -260,8 +273,25 @@ router.get(['/delivery/offers/active', '/rider/offers/active', '/delivery/orders
   const cash = await cashSummary(rider);
   const query = { status: { $in: ['READY', 'RIDER_ASSIGNMENT_PENDING'] }, riderId: null, fulfilmentType: 'DELIVERY' };
   if (cash.cashLimitBlocked) query.paymentMethod = { $ne: 'COD' };
-  const orders = await Order.find(query).populate('outletId customerId').sort({ readyAt: 1 }).limit(50);
-  ok(res, await Promise.all(orders.map((o) => serializeOrder(o, { offer: true }))));
+  const orders = await Order.find(query).populate('outletId customerId').sort({ readyAt: 1 }).limit(100);
+  const riderConfig = await settings.get('rider');
+  const assignmentRadiusKm = Number(riderConfig?.assignmentRadiusKm ?? riderConfig?.deliveryOfferRadiusKm ?? 8);
+  const latestLocation = await RiderLocation.findOne({ riderId: rider._id }).sort({ recordedAt: -1 });
+  if (!latestLocation) throw new AppError('Update current location to receive nearby orders', 409, 'RIDER_LOCATION_REQUIRED');
+  const [riderLng, riderLat] = latestLocation.location?.coordinates || [0, 0];
+  const nearby = orders.filter((order) => {
+    const [outletLng, outletLat] = order.outletId?.location?.coordinates || [0, 0];
+    if (!outletLat || !outletLng || !riderLat || !riderLng) return false;
+    const toRad = (value) => value * Math.PI / 180;
+    const dLat = toRad(outletLat - riderLat);
+    const dLng = toRad(outletLng - riderLng);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(riderLat)) * Math.cos(toRad(outletLat)) * Math.sin(dLng / 2) ** 2;
+    const pickupDistanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    order._pickupDistanceKm = Number(pickupDistanceKm.toFixed(2));
+    return pickupDistanceKm <= assignmentRadiusKm;
+  });
+  const serialized = await Promise.all(nearby.map(async (o) => ({ ...(await serializeOrder(o, { offer: true })), pickupDistanceKm: o._pickupDistanceKm, pickup_distance_km: o._pickupDistanceKm, assignmentRadiusKm, assignment_radius_km: assignmentRadiusKm })));
+  ok(res, serialized);
 }));
 
 router.post(['/delivery/offers/:id/accept', '/rider/offers/:id/accept', '/delivery/orders/:id/accept'], ah(async (req, res) => {
@@ -362,6 +392,14 @@ router.post(['/delivery/orders/:id/delivered', '/delivery/orders/:id/deliver', '
   const { rider, order } = await assignedOrder(req);
   if (order.paymentMethod === 'COD' && !order.cashCollected) throw new AppError('Collect COD cash before completing delivery', 409, 'CASH_NOT_COLLECTED');
   const updated = await orderService.changeStatus(order, { id: rider._id, role: 'RIDER' }, 'DELIVERED', null, req.headers['idempotency-key'] || `rider:${rider._id}:delivered:${order._id}`);
+  const rate = await riderRate();
+  const distanceKm = Number(updated.distanceKm || 0);
+  const earningAmount = Math.max(rate.minimum, Number((distanceKm * rate.perKm).toFixed(2)));
+  await RiderEarning.findOneAndUpdate(
+    { orderId: updated._id },
+    { $setOnInsert: { riderId: rider._id, outletId: updated.outletId, distanceKm, ratePerKm: rate.perKm, amount: earningAmount, status: 'PENDING' } },
+    { upsert: true, new: true }
+  );
   await updated.populate('outletId customerId');
   req.app.get('io')?.to(`order:${updated._id}`).emit('order-status', { orderId: String(updated._id), status: 'DELIVERED' });
   ok(res, await serializeOrder(updated), 'Delivery completed');
@@ -378,6 +416,10 @@ async function saveLocation(req, res) {
   const latitude = Number(req.body.latitude ?? req.body.lat);
   const longitude = Number(req.body.longitude ?? req.body.lng);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new AppError('Valid latitude and longitude are required', 400, 'INVALID_COORDINATES');
+  rider.riderProfile.currentLatitude = latitude;
+  rider.riderProfile.currentLongitude = longitude;
+  rider.riderProfile.lastLocationAt = new Date();
+  await rider.save();
   const loc = await RiderLocation.create({
     riderId: rider._id,
     orderId: order?._id,
@@ -483,6 +525,25 @@ router.post(['/rider/verification/:riderId', '/rider/verification/request'], upl
   rider.riderProfile.verificationStatus = 'PENDING';
   await rider.save();
   ok(res, verification, 'Rider verification submitted', 201);
+}));
+
+
+router.get('/rider/earnings/summary', ah(async (req, res) => {
+  const rider = await getRider(req);
+  const rows = await RiderEarning.aggregate([
+    { $match: { riderId: rider._id } },
+    { $group: { _id: '$status', total: { $sum: '$amount' }, count: { $sum: 1 } } },
+  ]);
+  const pending = Number(rows.find((x) => x._id === 'PENDING')?.total || 0);
+  const paid = Number(rows.find((x) => x._id === 'PAID')?.total || 0);
+  ok(res, { totalEarnings: pending + paid, pendingPayout: pending, paidEarnings: paid, totalDeliveries: await Order.countDocuments({ riderId: rider._id, status: 'DELIVERED' }) });
+}));
+
+router.get('/rider/payouts', ah(async (req, res) => {
+  const rider = await getRider(req);
+  const { RiderPayout } = require('../models');
+  const rows = await RiderPayout.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(100).lean();
+  ok(res, { items: rows.map((p) => ({ id: String(p._id), amount: p.amount, status: p.status, upiId: p.upiId, paymentReference: p.paymentReference, paidAt: p.paidAt, periodStart: p.periodStart, periodEnd: p.periodEnd, note: p.note })) });
 }));
 
 module.exports = router;

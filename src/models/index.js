@@ -26,7 +26,7 @@ const imageSchema = new Schema({ url:String, publicId:String, alt:String }, { _i
 const addressSchema = new Schema({ label:String, line1:String, line2:String, area:String, city:String, state:String, pincode:String, landmark:String, latitude:Number, longitude:Number, isDefault:{type:Boolean,default:false}, serviceable:{type:Boolean,default:false}, serviceabilityCheckedAt:Date, nearestOutletId:objectId('Outlet'), distanceKm:Number, allowedRadiusKm:Number, validationMessage:String }, { timestamps:true });
 
 const User = models.User || model('User', new Schema({
-  name:{type:String,required:true,trim:true}, email:{type:String,trim:true,lowercase:true,sparse:true,unique:true}, phone:{type:String,trim:true,sparse:true,unique:true}, passwordHash:{type:String,required:true,select:false}, role:{type:String,enum:['ADMIN','SELLER','RIDER','CUSTOMER'],default:'CUSTOMER',index:true}, active:{type:Boolean,default:true}, avatar:imageSchema, assignedOutletIds:[objectId('Outlet')], addresses:[addressSchema], favoriteProductIds:[objectId('Product')], walletBalance:{type:Number,default:0,min:0}, rewardPoints:{type:Number,default:0,min:0}, fcmTokens:[String], lastLoginAt:Date, riderProfile:{online:{type:Boolean,default:false},available:{type:Boolean,default:false},verificationStatus:{type:String,default:'UNVERIFIED',index:true},rating:{type:Number,default:0},cashLimit:{type:Number,default:2000,min:0},payoutAccount:{accountHolderName:String,accountNumber:String,ifsc:String,bankName:String,upiId:String,verified:{type:Boolean,default:false}},vehicle:{type:String,vehicleNumber:String,licenseNumber:String}}
+  name:{type:String,required:true,trim:true}, email:{type:String,trim:true,lowercase:true,sparse:true,unique:true}, phone:{type:String,trim:true,sparse:true,unique:true}, passwordHash:{type:String,required:true,select:false}, role:{type:String,enum:['ADMIN','SELLER','RIDER','CUSTOMER'],default:'CUSTOMER',index:true}, active:{type:Boolean,default:true}, avatar:imageSchema, assignedOutletIds:[objectId('Outlet')], addresses:[addressSchema], favoriteProductIds:[objectId('Product')], walletBalance:{type:Number,default:0,min:0}, rewardPoints:{type:Number,default:0,min:0}, fcmTokens:[String], lastLoginAt:Date, riderProfile:{online:{type:Boolean,default:false},available:{type:Boolean,default:false},verificationStatus:{type:String,default:'UNVERIFIED',index:true},rating:{type:Number,default:0},cashLimit:{type:Number,default:2000,min:0},payoutAccount:{accountHolderName:String,accountNumber:String,ifsc:String,bankName:String,upiId:String,verified:{type:Boolean,default:false}},vehicle:{type:String,vehicleNumber:String,licenseNumber:String}, currentLatitude:Number,currentLongitude:Number,lastLocationAt:Date, upiReminderSentAt:Date}
 },{timestamps:true}));
 
 const Outlet = models.Outlet || model('Outlet', new Schema({
@@ -83,9 +83,26 @@ const Refund = models.Refund || model('Refund', new Schema({orderId:objectId('Or
 Refund.schema.index({orderId:1,paymentId:1},{unique:true});
 const RiderLocation = models.RiderLocation || model('RiderLocation', new Schema({riderId:objectId('User',true),orderId:objectId('Order'),location:{type:{type:String,default:'Point'},coordinates:[Number]},heading:Number,speed:Number,accuracy:Number,recordedAt:{type:Date,default:Date.now}}, {timestamps:true})); RiderLocation.schema.index({location:'2dsphere'}); RiderLocation.schema.index({riderId:1,recordedAt:-1});
 
-const RiderCashTransaction = models.RiderCashTransaction || model('RiderCashTransaction', new Schema({riderId:objectId('User',true),orderId:objectId('Order'),type:{type:String,enum:['COLLECTED','DEPOSIT'],required:true,index:true},amount:{type:Number,required:true,min:0},paymentMethod:String,paymentReference:String,status:{type:String,default:'CONFIRMED'},note:String},{timestamps:true}));
+const RiderCashTransaction = models.RiderCashTransaction || model('RiderCashTransaction', new Schema({riderId:objectId('User',true),orderId:objectId('Order'),type:{type:String,enum:['COLLECTED','DEPOSIT','ADMIN_CASH_CONFIRMED'],required:true,index:true},amount:{type:Number,required:true,min:0},paymentMethod:String,paymentReference:String,status:{type:String,default:'CONFIRMED'},note:String},{timestamps:true}));
 RiderCashTransaction.schema.index({riderId:1,createdAt:-1});
-const RiderEarning = models.RiderEarning || model('RiderEarning', new Schema({riderId:objectId('User',true),orderId:{type:Schema.Types.ObjectId,ref:'Order',required:true,unique:true},outletId:objectId('Outlet',true),distanceKm:Number,ratePerKm:Number,amount:Number,status:{type:String,default:'PENDING'},settledAt:Date},{timestamps:true}));
+const RiderEarning = models.RiderEarning || model('RiderEarning', new Schema({riderId:objectId('User',true),orderId:{type:Schema.Types.ObjectId,ref:'Order',required:true,unique:true},outletId:objectId('Outlet',true),distanceKm:Number,ratePerKm:Number,amount:Number,status:{type:String,enum:['PENDING','PAID'],default:'PENDING',index:true},settledAt:Date,payoutId:objectId('RiderPayout')},{timestamps:true}));
+
+const RiderPayout = models.RiderPayout || model('RiderPayout', new Schema({
+  riderId:objectId('User',true),
+  periodStart:{type:Date,required:true,index:true},
+  periodEnd:{type:Date,required:true,index:true},
+  amount:{type:Number,required:true,min:0},
+  upiId:String,
+  paymentMethod:{type:String,default:'UPI'},
+  paymentReference:String,
+  status:{type:String,enum:['PENDING','PAID','FAILED','CANCELLED'],default:'PENDING',index:true},
+  earningIds:[objectId('RiderEarning')],
+  paidBy:objectId('User'),
+  paidAt:Date,
+  note:String
+},{timestamps:true}));
+RiderPayout.schema.index({riderId:1,periodStart:1,periodEnd:1},{unique:true});
+
 const OfflineSale = models.OfflineSale || model('OfflineSale', new Schema({outletId:objectId('Outlet',true),sellerId:objectId('User',true),items:[{productId:objectId('Product',true),name:String,quantity:Number,unitPrice:Number,total:Number}],subtotal:Number,tax:Number,total:Number,paymentMode:String,idempotencyKey:{type:String,unique:true}},{timestamps:true}));
 const Invoice = models.Invoice || model('Invoice', new Schema({orderId:{type:Schema.Types.ObjectId,ref:'Order',required:true,unique:true},invoiceNumber:{type:String,required:true,unique:true},invoiceDate:{type:Date,default:Date.now},pdfUrl:String,generatedAt:{type:Date,default:Date.now}},{timestamps:true}));
 const Setting = models.Setting || model('Setting', new Schema({key:{type:String,required:true,unique:true,index:true},value:Schema.Types.Mixed,encryptedValue:String,encryptionIv:String,encryptionTag:String,isSecret:{type:Boolean,default:false,index:true},public:{type:Boolean,default:false},active:{type:Boolean,default:true,index:true},version:{type:Number,default:1},lastValidatedAt:Date,updatedBy:objectId('User')},{timestamps:true}));
@@ -116,4 +133,4 @@ const SupportTicket = models.SupportTicket || model('SupportTicket', new Schema(
 const VerificationRequest = models.VerificationRequest || model('VerificationRequest', new Schema({userId:objectId('User',true),outletId:objectId('Outlet'),type:String,status:{type:String,default:'PENDING',index:true},documents:[imageSchema],note:String,reviewedBy:objectId('User'),reviewedAt:Date},{timestamps:true}));
 const DailyClosing = models.DailyClosing || model('DailyClosing', new Schema({outletId:objectId('Outlet',true),sellerId:objectId('User',true),businessDate:{type:String,required:true},stockSnapshot:[{productId:objectId('Product'),stockQuantity:Number,reservedQuantity:Number}],onlineSales:Number,offlineSales:Number,totalSales:Number,notes:String,submittedAt:{type:Date,default:Date.now}},{timestamps:true})); DailyClosing.schema.index({outletId:1,businessDate:1},{unique:true});
 
-module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,PaymentWebhookEvent,Refund,RiderLocation,RiderCashTransaction,RiderEarning,OfflineSale,Invoice,Setting,SettingAudit,Notification,BiteStory,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};
+module.exports={User,Outlet,Category,Brand,Product,OutletProduct,Cart,Order,OrderEvent,InventoryMovement,Payment,PaymentWebhookEvent,Refund,RiderLocation,RiderCashTransaction,RiderEarning,RiderPayout,OfflineSale,Invoice,Setting,SettingAudit,Notification,BiteStory,Banner,Offer,Coupon,Review,WalletTransaction,SupportTicket,VerificationRequest,DailyClosing};
