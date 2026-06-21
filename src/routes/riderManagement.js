@@ -64,7 +64,7 @@ async function serializeRider(rider) {
     online:Boolean(profile.online), available:Boolean(profile.available), blocked:!rider.active,
     verified:VERIFIED.has(String(profile.verificationStatus||'').toUpperCase()),
     verificationStatus:profile.verificationStatus || 'UNVERIFIED', verificationRequestId:verification?._id,
-    verificationRequest:verification ? { id:String(verification._id), status:verification.status, documents:verification.documents, note:verification.note, createdAt:verification.createdAt } : null,
+    verificationRequest:verification ? { id:String(verification._id), status:verification.status, documents:(verification.documents||[]).map(d=>({url:d.url,publicId:d.publicId,alt:d.alt,downloadUrl:d.url})), note:verification.note, createdAt:verification.createdAt, reviewedAt:verification.reviewedAt } : null,
     totalDeliveries:delivered, totalEarnings:earnings.total, pendingPayout:earnings.pending, paidEarnings:earnings.paid,
     cashInHand:cash.outstanding, totalCashCollected:cash.collected, totalCashDeposited:cash.deposited,
     cashLimit:Number(profile.cashLimit||0), rating:Number(profile.rating||0),

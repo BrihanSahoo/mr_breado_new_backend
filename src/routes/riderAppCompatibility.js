@@ -519,11 +519,27 @@ router.get('/rider/verification/status', ah(async (req, res) => {
 router.post(['/rider/verification/:riderId', '/rider/verification/request'], upload.fields([{ name: 'aadhaarFront', maxCount: 1 }, { name: 'aadhaarBack', maxCount: 1 }, { name: 'drivingLicense', maxCount: 1 }, { name: 'vehicleRc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }]), ah(async (req, res) => {
   const rider = await getRider(req);
   if (req.params.riderId && String(req.params.riderId) !== String(rider.legacyId) && String(req.params.riderId) !== String(rider._id) && req.user.role !== 'ADMIN') throw new AppError('Cannot submit verification for another rider', 403);
+
+  const requiredFields = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc', 'profilePhoto'];
+  const missing = requiredFields.filter((field) => !(req.files?.[field]?.length));
+  if (missing.length) throw new AppError(`Missing required verification documents: ${missing.join(', ')}`, 400, 'VERIFICATION_DOCUMENTS_REQUIRED');
+
+  const current = await VerificationRequest.findOne({ userId: rider._id, type: 'RIDER', status: 'PENDING' }).sort({ createdAt: -1 });
+  if (current) throw new AppError('A rider verification request is already pending admin review', 409, 'VERIFICATION_ALREADY_PENDING');
+
   const documents = [];
-  for (const [field, files] of Object.entries(req.files || {})) for (const file of files) { const doc = await uploadDocument(file); if (doc) documents.push({ ...doc, alt: field }); }
+  for (const [field, files] of Object.entries(req.files || {})) {
+    for (const file of files) {
+      const doc = await uploadDocument(file);
+      if (doc) documents.push({ ...doc, alt: field });
+    }
+  }
   const verification = await VerificationRequest.create({ userId: rider._id, type: 'RIDER', status: 'PENDING', documents, note: JSON.stringify(req.body || {}) });
   rider.riderProfile.verificationStatus = 'PENDING';
+  rider.riderProfile.online = false;
+  rider.riderProfile.available = false;
   await rider.save();
+  await Notification.create({ userId: rider._id, role: 'RIDER', title: 'Verification submitted', message: 'Your documents were submitted successfully and are awaiting admin review.', type: 'RIDER_VERIFICATION', data: { verificationRequestId: verification._id, status: 'PENDING' } });
   ok(res, verification, 'Rider verification submitted', 201);
 }));
 

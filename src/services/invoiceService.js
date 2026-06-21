@@ -1,5 +1,5 @@
 const PDFDocument = require('pdfkit');
-const { Invoice, Order } = require('../models');
+const { Invoice, Order, Payment } = require('../models');
 const { AppError } = require('../utils/errors');
 
 const money = (value) => `₹${Number(value || 0).toFixed(2)}`;
@@ -28,7 +28,9 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
   // Supports both stream(order, res) and legacy stream(orderId, user, res).
   const res = maybeRes || maybeUserOrRes;
   const order = await resolveOrder(orderOrId);
-  if (order.status !== 'DELIVERED') throw new AppError('Invoice is available only after delivery', 409, 'INVOICE_NOT_READY');
+  const isFinal = order.status === 'DELIVERED';
+  const isPaidTakeaway = order.fulfilmentType === 'TAKEAWAY' && Number(order.paidAmount || 0) > 0;
+  if (!isFinal && !isPaidTakeaway) throw new AppError('Invoice is available after delivery or after takeaway advance payment', 409, 'INVOICE_NOT_READY');
 
   const invoice = await Invoice.findOneAndUpdate(
     { orderId: order._id },
@@ -38,12 +40,14 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
 
   const outlet = order.outletId || {};
   const customer = order.customerId || {};
+  const payment = await Payment.findOne({ orderId: order._id, status: { $in: ['SUCCESS', 'CAPTURED', 'AUTHORIZED'] } }).sort({ createdAt: -1 }).lean();
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${invoice.invoiceNumber}.pdf"`);
 
   const d = new PDFDocument({ margin: 42, size: 'A4' });
   d.pipe(res);
-  d.fontSize(22).text(text(outlet.name, 'MR BREАDO'), { align: 'center' });
+  d.fontSize(22).text('MR. BREADO', { align: 'center' });
+  d.fontSize(9).text(text(outlet.name, 'Official Outlet'), { align: 'center' });
   d.fontSize(10).text('TAX INVOICE', { align: 'center' }).moveDown(0.5);
   d.fontSize(9).text(addressLine(outlet.address), { align: 'center' });
   d.text(`GSTIN: ${text(outlet.gstin, 'Not provided')}`, { align: 'center' }).moveDown();
@@ -65,6 +69,7 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
     const custom = (item.customizations || []).map((x) => x.optionName || x.name).filter(Boolean).join(', ');
     d.fontSize(10).text(`${text(item.name)}${variants ? ` (${variants})` : ''} × ${Number(item.quantity || 0)}`);
     if (custom) d.fontSize(8).text(`  Add-ons: ${custom}`);
+    if (item.cakeMessage) d.fontSize(8).text(`  Cake message: ${item.cakeMessage}`);
     d.fontSize(10).text(money(item.finalTotal), { align: 'right' });
   }
 
@@ -76,9 +81,14 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
     .fontSize(13).text(`Grand Total: ${money(order.total)}`, { align: 'right' })
     .moveDown().fontSize(9)
     .text(`Payment: ${text(order.paymentMethod)} / ${text(order.paymentStatus)}`)
+    .text(`Paid amount: ${money(order.paidAmount)}`)
+    .text(`Balance due: ${money(order.balanceDue)}`)
+    .text(`Razorpay order ID: ${text(payment?.gatewayOrderId)}`)
+    .text(`Razorpay payment ID: ${text(payment?.gatewayPaymentId)}`)
     .text(`Fulfilment: ${text(order.fulfilmentType)}`)
     .text(`Outlet: ${text(outlet.name)} (${text(outlet.code)})`)
-    .moveDown().text('This is a computer-generated invoice.', { align: 'center' });
+    .moveDown().fontSize(8).text('Mr. Breado branding: https://res.cloudinary.com/dswsz53xi/image/upload/v1781831035/mr-breado/brands/qogzsdj39ywandrw1g9f.png', { align: 'center' })
+    .text('This is a computer-generated invoice.', { align: 'center' });
   d.end();
 }
 
