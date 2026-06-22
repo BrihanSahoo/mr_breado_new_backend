@@ -29,6 +29,9 @@ async function repairSellerOutletAssignment(user) {
     if (existingOutlet) return existingOutlet;
   }
 
+  const direct=await Outlet.findOne({managerUserId:user._id}).sort({updatedAt:-1});
+  if(direct){ user.assignedOutletIds=[direct._id]; await user.save(); return direct; }
+
   const or = [];
   if (user.email) {
     const email = String(user.email).trim().toLowerCase();

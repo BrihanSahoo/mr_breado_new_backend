@@ -254,6 +254,7 @@ r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{
   await user.save();
 
   outlet.managerName=user.name;
+  outlet.managerUserId=user._id;
   if(phone) outlet.managerPhone=phone;
   if(email) outlet.email=email;
   await outlet.save();
@@ -264,14 +265,61 @@ r.get('/admin/outlets/:id/orders', ah(async(req,res)=>ok(res,(await Order.find({
 r.get('/admin/outlets/:id/stock-ledger', ah(async(req,res)=>ok(res,await InventoryMovement.find({outletId:req.params.id}).populate('productId').sort({createdAt:-1}).limit(500).lean())));
 r.get('/admin/outlets/:id/stock-submissions', ah(async(req,res)=>ok(res,await DailyClosing.find({outletId:req.params.id}).populate('sellerId').sort({businessDate:-1}).lean())));
 r.get('/admin/outlets/:id/business-audit', ah(async(req,res)=>ok(res,{orderEvents:await OrderEvent.find({orderId:{$in:await Order.distinct('_id',{outletId:req.params.id})}}).sort({createdAt:-1}).limit(200).lean(),inventoryMovements:await InventoryMovement.find({outletId:req.params.id}).sort({createdAt:-1}).limit(200).lean()})));
+
+r.get('/admin/selected-outlet', ah(async(req,res)=>{
+  const selected=await settings.get('admin_selected_outlet');
+  const outletId=String(selected?.outletId||selected||'').trim();
+  if(!outletId) return ok(res,{outletId:null,outlet:null});
+  const outlet=mongoose.isValidObjectId(outletId)?await Outlet.findById(outletId).lean():null;
+  if(!outlet){ await settings.set('admin_selected_outlet',{outletId:null},req.user.id,false,{requestId:req.id}); return ok(res,{outletId:null,outlet:null}); }
+  ok(res,{outletId:String(outlet._id),outlet:normalizeOutlet(outlet)});
+}));
+r.put('/admin/selected-outlet', ah(async(req,res)=>{
+  const outletId=String(req.body.outletId||'').trim();
+  if(!mongoose.isValidObjectId(outletId)) throw new AppError('Select a valid outlet',400,'INVALID_OUTLET_ID');
+  const outlet=await Outlet.findById(outletId).lean();
+  if(!outlet) throw new AppError('Selected outlet was not found',404,'OUTLET_NOT_FOUND');
+  await settings.set('admin_selected_outlet',{outletId:String(outlet._id)},req.user.id,false,{requestId:req.id});
+  ok(res,{outletId:String(outlet._id),outlet:normalizeOutlet(outlet)},'Admin operating outlet updated');
+}));
+
+r.post('/admin/orders/:id/cancel', ah(async(req,res)=>{
+  const order=await Order.findById(req.params.id);
+  if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
+  if(['DELIVERED','CANCELLED','REJECTED'].includes(String(order.status).toUpperCase())) throw new AppError('This order is already final and cannot be cancelled',409,'ORDER_FINAL');
+  const reason=String(req.body.reason||'Cancelled by administrator').trim()||'Cancelled by administrator';
+  const changed=await orderService.changeStatus(order,req.user,'CANCELLED',reason,req.headers['idempotency-key']||`${req.id}:ADMIN_CANCEL`);
+  ok(res,normalizeOrder(changed.toObject?.()||changed),'Order cancelled');
+}));
+r.post('/admin/mr-breado/orders/:id/cancel', ah(async(req,res)=>{
+  const order=await Order.findById(req.params.id);
+  if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
+  if(['DELIVERED','CANCELLED','REJECTED'].includes(String(order.status).toUpperCase())) throw new AppError('This order is already final and cannot be cancelled',409,'ORDER_FINAL');
+  const changed=await orderService.changeStatus(order,req.user,'CANCELLED','Cancelled by administrator',req.headers['idempotency-key']||`${req.id}:ADMIN_CANCEL`);
+  ok(res,normalizeOrder(changed.toObject?.()||changed),'Order cancelled');
+}));
+
 r.get(['/admin/outlets/:id/performance','/admin/outlets/:id/calendar'], ah(async(req,res)=>{const orders=await Order.find({outletId:req.params.id}).lean();ok(res,{orders:orders.length,delivered:orders.filter(x=>x.status==='DELIVERED').length,cancelled:orders.filter(x=>x.status==='CANCELLED').length,revenue:orders.filter(x=>x.status==='DELIVERED').reduce((a,x)=>a+Number(x.total||0),0),items:orders})}));
 
 r.get(['/admin/payment-controls','/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
-  const [features,adminSettings,delivery,rider]=await Promise.all([settings.getBusinessFeatures(),settings.adminSettings(),settings.get('delivery_settings'),settings.get('rider_settings')]);
+  const [features,adminSettings,delivery,rider,razorpay]=await Promise.all([settings.getBusinessFeatures(),settings.adminSettings(),settings.get('delivery_settings'),settings.get('rider_settings'),settings.getRazorpayConfig(false)]);
   const rp=adminSettings.secrets.find(x=>x.key==='razorpay_credentials')||{};const gm=adminSettings.secrets.find(x=>x.key==='google_maps_credentials')||{};
-  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayKeyId:rp.keyId||'',razorpaySecretConfigured:rp.keySecretConfigured,razorpayWebhookSecretConfigured:rp.webhookSecretConfigured,googleMapKey:gm.apiKey||'',googleMapsApiKey:gm.apiKey||'',googleMapsApiKeyConfigured:Boolean(gm.configured&&gm.apiKey),googleMapsAdminActionRequired:!Boolean(gm.configured&&gm.apiKey),googleMapsStatusMessage:Boolean(gm.configured&&gm.apiKey)?'Google Maps API key is configured':'Google Maps API key is required before delivery can be enabled',baseDeliveryCharge:delivery?.baseCharge||0,deliveryChargePerKm:delivery?.perKmCharge||0,minimumDeliveryCharge:delivery?.minimumCharge||0,maximumDeliveryCharge:delivery?.maximumCharge||9999,riderBasePay:rider?.basePay||0,riderPayPerKm:rider?.perKmRate||0,distanceProvider:'GOOGLE'});
+  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayMode:String(razorpay?.keyId||'').startsWith('rzp_live_')?'LIVE':'TEST',razorpayKeyId:razorpay?.keyId||'',razorpaySecretConfigured:Boolean(razorpay?.keySecret),razorpayWebhookSecretConfigured:Boolean(razorpay?.webhookSecret),googleMapKey:gm.apiKey||'',googleMapsApiKey:gm.apiKey||'',googleMapsApiKeyConfigured:Boolean(gm.configured&&gm.apiKey),googleMapsAdminActionRequired:!Boolean(gm.configured&&gm.apiKey),googleMapsStatusMessage:Boolean(gm.configured&&gm.apiKey)?'Google Maps API key is configured':'Google Maps API key is required before delivery can be enabled',baseDeliveryCharge:delivery?.baseCharge||0,deliveryChargePerKm:delivery?.perKmCharge||0,minimumDeliveryCharge:delivery?.minimumCharge||0,maximumDeliveryCharge:delivery?.maximumCharge||9999,riderBasePay:rider?.basePay||0,riderPayPerKm:rider?.perKmRate||0,distanceProvider:'GOOGLE'});
 }));
-r.put('/admin/payment-controls', ah(async(req,res)=>{await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.onlinePaymentEnabled,takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,feature_toggles:{cod:req.body.codEnabled!==false}},req.user.id,{requestId:req.id});if(req.body.razorpayKeyId||req.body.razorpayKeySecret)await settings.setSecret('razorpay_credentials',{keyId:req.body.razorpayKeyId,keySecret:req.body.razorpayKeySecret||undefined,webhookSecret:req.body.razorpayWebhookSecret||undefined,enabled:req.body.onlinePaymentEnabled!==false},req.user.id,{requestId:req.id});ok(res,await settings.getBusinessFeatures(),'Payment controls saved')}));
+r.put('/admin/payment-controls', ah(async(req,res)=>{
+  await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.onlinePaymentEnabled,takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,feature_toggles:{cod:req.body.codEnabled!==false}},req.user.id,{requestId:req.id});
+  const current=await settings.getRazorpayConfig(false);
+  const suppliedKeyId=String(req.body.razorpayKeyId||'').trim();
+  const keyId=suppliedKeyId.includes('*')?current.keyId:suppliedKeyId||current.keyId;
+  const keySecret=String(req.body.razorpayKeySecret||'').trim()||current.keySecret;
+  const webhookSecret=String(req.body.razorpayWebhookSecret||'').trim()||current.webhookSecret;
+  if(req.body.onlinePaymentEnabled!==false){
+    if(!/^rzp_(test|live)_[A-Za-z0-9]+$/.test(String(keyId||''))) throw new AppError('Enter a valid Razorpay Key ID',400,'INVALID_RAZORPAY_KEY_ID');
+    if(!keySecret) throw new AppError('Razorpay Secret Key is required',400,'INVALID_RAZORPAY_SECRET');
+  }
+  await settings.setSecret('razorpay_credentials',{keyId,keySecret,webhookSecret,enabled:req.body.onlinePaymentEnabled!==false},req.user.id,{requestId:req.id});
+  ok(res,{...(await settings.getBusinessFeatures()),razorpayKeyId:keyId,razorpaySecretConfigured:Boolean(keySecret),razorpayWebhookSecretConfigured:Boolean(webhookSecret)},'Payment controls saved');
+}));
 r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
   const apiKey=String(req.body.googleMapKey||req.body.googleMapsApiKey||'').trim();
   const current=await settings.getGoogleMapsConfig(false);

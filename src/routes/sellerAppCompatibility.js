@@ -55,6 +55,13 @@ function ensureOutlet(user, outletId) {
 async function repairCurrentSellerAssignment(req) {
   if (req.user.role !== 'SELLER') return null;
 
+  const direct=await Outlet.findOne({managerUserId:req.user.id}).sort({updatedAt:-1});
+  if(direct){
+    await User.updateOne({_id:req.user.id},{$set:{assignedOutletIds:[direct._id]}});
+    req.user.assignedOutletIds=[direct._id];
+    return direct._id;
+  }
+
   const or = [];
   if (req.user.email) {
     const email = String(req.user.email).trim().toLowerCase();

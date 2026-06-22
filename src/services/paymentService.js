@@ -51,18 +51,24 @@ async function createOrder({ orderId, userId, idempotencyKey }) {
     };
   }
 
-  const rz = await instance.orders.create({
-    amount: Math.round(amount * 100),
-    currency: 'INR',
-    receipt: order.slug,
-    notes: {
-      appOrderId: String(order._id),
-      outletId: String(order.outletId),
-      customerId: String(userId),
-      fulfilmentType: order.fulfilmentType,
-      fullOrderTotal: String(order.total),
-    },
-  });
+  let rz;
+  try {
+    rz = await instance.orders.create({
+      amount: Math.round(amount * 100),
+      currency: 'INR',
+      receipt: String(order.slug || order._id).slice(0, 40),
+      notes: {
+        appOrderId: String(order._id),
+        outletId: String(order.outletId),
+        customerId: String(userId),
+        fulfilmentType: order.fulfilmentType,
+        fullOrderTotal: String(order.total),
+      },
+    });
+  } catch (error) {
+    const detail = error?.error?.description || error?.error?.reason || error?.message || 'Razorpay order creation failed';
+    throw new AppError(`Razorpay could not create the payment order: ${detail}`, 502, 'RAZORPAY_ORDER_CREATE_FAILED');
+  }
 
   await Payment.create({
     orderId: order._id,
