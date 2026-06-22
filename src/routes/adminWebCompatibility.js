@@ -213,7 +213,53 @@ r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>{
   ok(res,{...normalizeOutlet(out),coordinatesCorrected:Boolean(coords.suppliedCoordinatesSwapped)},'Outlet location updated');
 }));
 r.post('/admin/outlets/:id/branding', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{logo:imageUrl(req.body.profileImage||req.body.logo),coverImage:imageUrl(req.body.bannerImage||req.body.coverImage),managerPhone:req.body.phone,email:req.body.email,'address.line1':req.body.address}},{new:true}).lean()))));
-r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{const password=String(req.body.password||'');if(password.length<8)throw new AppError('Password must contain at least 8 characters');const username=String(req.body.username||'').trim().toLowerCase();const email=String(req.body.email||'').trim().toLowerCase();const phone=String(req.body.phone||'').trim();if(!username&&!email&&!phone)throw new AppError('Enter a username, email or phone for outlet login',400,'SELLER_IDENTITY_REQUIRED');const identities=[];if(username)identities.push({username});if(email)identities.push({email});if(phone)identities.push({phone});let user=await User.findOne({role:'SELLER',$or:[{assignedOutletIds:req.params.id},...identities]}).select('+passwordHash');if(!user)user=new User({role:'SELLER'});user.name=req.body.name||req.body.managerName||user.name||'Outlet Manager';user.username=username||undefined;user.email=email||undefined;user.phone=phone||undefined;user.passwordHash=await bcrypt.hash(password,12);user.assignedOutletIds=[req.params.id];user.active=true;await user.save();ok(res,{id:String(user._id),username:user.username,email:user.email,phone:user.phone,assignedOutletIds:user.assignedOutletIds,loginWith:user.username||user.email||user.phone},'Outlet credentials saved')}));
+r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{
+  const mongoose=require('mongoose');
+  const outletId=String(req.params.id||'').trim();
+  if(!mongoose.isValidObjectId(outletId)) throw new AppError('The selected outlet id is invalid. Refresh the page and try again.',400,'INVALID_OUTLET_ID');
+  const outlet=await Outlet.findById(outletId);
+  if(!outlet) throw new AppError('The selected outlet no longer exists.',404,'OUTLET_NOT_FOUND');
+
+  const password=String(req.body.password||'');
+  if(password.length<8) throw new AppError('Password must contain at least 8 characters',400,'WEAK_PASSWORD');
+
+  const username=String(req.body.username||'').trim().toLowerCase();
+  const email=String(req.body.email||'').trim().toLowerCase();
+  const phone=String(req.body.phone||'').replace(/\s+/g,'').trim();
+  if(!username&&!email&&!phone) throw new AppError('Enter a username, email or phone for outlet login',400,'SELLER_IDENTITY_REQUIRED');
+  if(username&&!/^[a-z0-9._-]{3,40}$/.test(username)) throw new AppError('Username must be 3-40 characters and use only letters, numbers, dot, underscore or hyphen.',400,'INVALID_USERNAME');
+  if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AppError('Enter a valid outlet manager email address.',400,'INVALID_EMAIL');
+  if(phone&&!/^\+?[0-9]{8,15}$/.test(phone)) throw new AppError('Enter a valid outlet manager phone number.',400,'INVALID_PHONE');
+
+  let user=await User.findOne({role:'SELLER',assignedOutletIds:outletId}).select('+passwordHash');
+  const identities=[];
+  if(username) identities.push({username});
+  if(email) identities.push({email});
+  if(phone) identities.push({phone});
+
+  const conflict=identities.length?await User.findOne({...(user?{_id:{$ne:user._id}}:{}),$or:identities}).lean():null;
+  if(conflict){
+    const field=conflict.username===username&&username?'username':conflict.email===email&&email?'email':'phone';
+    throw new AppError(`This ${field} is already used by another account. Enter a unique ${field} for this outlet manager.`,409,'SELLER_IDENTITY_CONFLICT',{field});
+  }
+
+  if(!user) user=new User({role:'SELLER'});
+  user.name=String(req.body.name||req.body.managerName||user.name||'Outlet Manager').trim();
+  user.username=username||undefined;
+  user.email=email||undefined;
+  user.phone=phone||undefined;
+  user.passwordHash=await bcrypt.hash(password,12);
+  user.assignedOutletIds=[outletId];
+  user.active=true;
+  await user.save();
+
+  outlet.managerName=user.name;
+  if(phone) outlet.managerPhone=phone;
+  if(email) outlet.email=email;
+  await outlet.save();
+
+  ok(res,{id:String(user._id),username:user.username,email:user.email,phone:user.phone,assignedOutletIds:user.assignedOutletIds.map(String),loginWith:user.username||user.email||user.phone},'Outlet credentials saved');
+}));
 r.get('/admin/outlets/:id/orders', ah(async(req,res)=>ok(res,(await Order.find({outletId:req.params.id}).populate('customerId outletId riderId').sort({createdAt:-1}).lean()).map(normalizeOrder))));
 r.get('/admin/outlets/:id/stock-ledger', ah(async(req,res)=>ok(res,await InventoryMovement.find({outletId:req.params.id}).populate('productId').sort({createdAt:-1}).limit(500).lean())));
 r.get('/admin/outlets/:id/stock-submissions', ah(async(req,res)=>ok(res,await DailyClosing.find({outletId:req.params.id}).populate('sellerId').sort({businessDate:-1}).lean())));
