@@ -9,7 +9,7 @@ const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const {
   User, Outlet, Category, Brand, Product, OutletProduct, Order, OrderEvent,
-  Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice, BiteStory,
+  Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice, BiteStory, Setting,
 } = require('../models');
 const settings = require('../services/settingsService');
 const orderService = require('../services/orderService');
@@ -213,6 +213,12 @@ r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>{
   ok(res,{...normalizeOutlet(out),coordinatesCorrected:Boolean(coords.suppliedCoordinatesSwapped)},'Outlet location updated');
 }));
 r.post('/admin/outlets/:id/branding', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{logo:imageUrl(req.body.profileImage||req.body.logo),coverImage:imageUrl(req.body.bannerImage||req.body.coverImage),managerPhone:req.body.phone,email:req.body.email,'address.line1':req.body.address}},{new:true}).lean()))));
+r.get('/admin/outlets/:id/credentials', ah(async(req,res)=>{
+  const outlet=await Outlet.findById(req.params.id).lean();
+  if(!outlet) throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
+  const user=await User.findOne({role:'SELLER',assignedOutletIds:outlet._id}).lean();
+  ok(res,{configured:Boolean(user),managerName:user?.name||outlet.managerName||'',username:user?.username||'',email:user?.email||outlet.email||'',phone:user?.phone||outlet.managerPhone||'',assignedOutletIds:(user?.assignedOutletIds||[]).map(String),passwordConfigured:Boolean(user)});
+}));
 r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{
   const mongoose=require('mongoose');
   const outletId=String(req.params.id||'').trim();
@@ -264,6 +270,26 @@ r.get('/admin/outlets/:id/orders', ah(async(req,res)=>ok(res,(await Order.find({
 r.get('/admin/outlets/:id/stock-ledger', ah(async(req,res)=>ok(res,await InventoryMovement.find({outletId:req.params.id}).populate('productId').sort({createdAt:-1}).limit(500).lean())));
 r.get('/admin/outlets/:id/stock-submissions', ah(async(req,res)=>ok(res,await DailyClosing.find({outletId:req.params.id}).populate('sellerId').sort({businessDate:-1}).lean())));
 r.get('/admin/outlets/:id/business-audit', ah(async(req,res)=>ok(res,{orderEvents:await OrderEvent.find({orderId:{$in:await Order.distinct('_id',{outletId:req.params.id})}}).sort({createdAt:-1}).limit(200).lean(),inventoryMovements:await InventoryMovement.find({outletId:req.params.id}).sort({createdAt:-1}).limit(200).lean()})));
+r.get('/admin/selected-outlet', ah(async(req,res)=>{
+  const row=await Setting.findOne({key:'admin_selected_outlet',active:true}).lean();
+  const outlet=row?.value?.outletId?await Outlet.findById(row.value.outletId).lean():null;
+  ok(res,{outletId:outlet?String(outlet._id):null,outlet:outlet?normalizeOutlet(outlet):null});
+}));
+r.put('/admin/selected-outlet', ah(async(req,res)=>{
+  const outlet=await Outlet.findById(req.body.outletId).lean();
+  if(!outlet) throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
+  await Setting.findOneAndUpdate({key:'admin_selected_outlet'},{$set:{value:{outletId:String(outlet._id)},active:true,updatedBy:req.user.id}},{upsert:true,new:true});
+  ok(res,{outletId:String(outlet._id),outlet:normalizeOutlet(outlet)},'Selected outlet updated');
+}));
+r.delete('/admin/outlets/:id', ah(async(req,res)=>{
+  const outlet=await Outlet.findById(req.params.id);
+  if(!outlet) throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
+  const activeOrders=await Order.countDocuments({outletId:outlet._id,status:{$nin:['DELIVERED','CANCELLED','REJECTED','REFUNDED']}});
+  if(activeOrders) throw new AppError('This outlet has active orders and cannot be deleted.',409,'OUTLET_HAS_ACTIVE_ORDERS');
+  await Promise.all([OutletProduct.deleteMany({outletId:outlet._id}),User.updateMany({assignedOutletIds:outlet._id},{$pull:{assignedOutletIds:outlet._id}}),Setting.updateOne({key:'admin_selected_outlet','value.outletId':String(outlet._id)},{$set:{value:{outletId:null}}})]);
+  await outlet.deleteOne();
+  ok(res,{deleted:true,id:String(req.params.id)},'Outlet deleted');
+}));
 r.get(['/admin/outlets/:id/performance','/admin/outlets/:id/calendar'], ah(async(req,res)=>{const orders=await Order.find({outletId:req.params.id}).lean();ok(res,{orders:orders.length,delivered:orders.filter(x=>x.status==='DELIVERED').length,cancelled:orders.filter(x=>x.status==='CANCELLED').length,revenue:orders.filter(x=>x.status==='DELIVERED').reduce((a,x)=>a+Number(x.total||0),0),items:orders})}));
 
 r.get(['/admin/payment-controls','/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
