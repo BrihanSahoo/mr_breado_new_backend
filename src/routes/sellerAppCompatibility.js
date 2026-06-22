@@ -52,22 +52,60 @@ function ensureOutlet(user, outletId) {
     throw new AppError('Outlet access denied', 403, 'OUTLET_ACCESS_DENIED');
   }
 }
+async function repairCurrentSellerAssignment(req) {
+  if (req.user.role !== 'SELLER') return null;
+
+  const or = [];
+  if (req.user.email) or.push({ email: String(req.user.email).trim().toLowerCase() });
+  if (req.user.phone) or.push({ managerPhone: String(req.user.phone).trim() });
+  if (req.user.name) or.push({ managerName: String(req.user.name).trim() });
+  if (!or.length) return null;
+
+  const outlet = await Outlet.findOne({ $or: or }).sort({ updatedAt: -1 });
+  if (!outlet) return null;
+
+  await User.updateOne(
+    { _id: req.user.id },
+    { $set: { assignedOutletIds: [outlet._id] } },
+  );
+  req.user.assignedOutletIds = [outlet._id];
+  return outlet._id;
+}
+
 async function currentOutlet(req) {
   const requested = req.query.outletId || req.body?.outletId || req.body?.restaurantId;
-  const first = req.user.assignedOutletIds?.[0];
-  if (requested) {
-    const id = await resolveObjectId(Outlet, requested);
-    if (!id) throw new AppError('Outlet not found', 404, 'OUTLET_NOT_FOUND');
-    if (req.user.role !== 'ADMIN' && !outletIdsFor(req.user).includes(String(id))) {
-      // Self-heal stale mobile outlet context after credentials are reassigned.
-      // The authenticated seller is always restricted to the outlet stored in MongoDB.
-      if (first) return first;
-      throw new AppError('No outlet assigned', 403, 'NO_OUTLET_ASSIGNED');
+
+  if (req.user.role === 'ADMIN') {
+    if (!requested) {
+      throw new AppError('Select an outlet first', 400, 'OUTLET_SELECTION_REQUIRED');
     }
-    return id;
+    const adminOutletId = await resolveObjectId(Outlet, requested);
+    if (!adminOutletId) throw new AppError('Outlet not found', 404, 'OUTLET_NOT_FOUND');
+    return adminOutletId;
   }
-  if (!first && req.user.role !== 'ADMIN') throw new AppError('No outlet assigned', 403, 'NO_OUTLET_ASSIGNED');
-  return first;
+
+  let allowedIds = outletIdsFor(req.user);
+  if (!allowedIds.length) {
+    const repairedId = await repairCurrentSellerAssignment(req);
+    if (repairedId) allowedIds = [String(repairedId)];
+  }
+
+  if (!allowedIds.length) {
+    throw new AppError(
+      'No outlet is assigned to this seller account. Ask the administrator to save outlet login credentials again.',
+      403,
+      'NO_OUTLET_ASSIGNED',
+    );
+  }
+
+  if (requested) {
+    const requestedId = await resolveObjectId(Outlet, requested);
+    if (requestedId && allowedIds.includes(String(requestedId))) return requestedId;
+    // A stale mobile selection must never lock out the seller. Ignore it and use
+    // the authenticated account's current outlet assignment.
+  }
+
+  return allowedIds[0];
 }
 async function orderForUser(req) {
   const order = await findOneCompat(Order, req.params.id);
@@ -352,7 +390,7 @@ r.post(['/outlet-manager/close-day','/outlet-manager/day-close','/outlet-manager
   const calculatedOffline = offline.reduce((a,x) => a + Number(x.total || 0), 0);
   const closing = await DailyClosing.findOneAndUpdate(
     { outletId, businessDate },
-    { $set: { sellerId: req.user.id, stockSnapshot: (Array.isArray(req.body.stockSnapshot) && req.body.stockSnapshot.length ? req.body.stockSnapshot : inventory.map((x) => ({ productId: x.productId, stockQuantity: x.stockQuantity, reservedQuantity: x.reservedQuantity, availableStock: Math.max(0, Number(x.stockQuantity||0)-Number(x.reservedQuantity||0)) }))), onlineSales: orders.reduce((a,x) => a + Number(x.total || 0), 0), offlineSales: calculatedOffline || Number(req.body.offlineSales || 0), offlineCashSales:Number(req.body.offlineCashSales||0), offlineUpiSales:Number(req.body.offlineUpiSales||0), offlineCardSales:Number(req.body.offlineCardSales||0), offlineOtherSales:Number(req.body.offlineOtherSales||0), offlineOrderCount:Number(req.body.offlineOrderCount||0), refunds:Number(req.body.refunds||0), expenses:Number(req.body.expenses||0), totalSales: orders.reduce((a,x) => a + Number(x.total || 0), 0) + (calculatedOffline || Number(req.body.offlineSales || 0)), notes: req.body.note || req.body.notes, submittedAt: new Date() } },
+    { $set: { sellerId: req.user.id, stockSnapshot: inventory.map((x) => ({ productId: x.productId, stockQuantity: x.stockQuantity, reservedQuantity: x.reservedQuantity })), onlineSales: orders.reduce((a,x) => a + Number(x.total || 0), 0), offlineSales: calculatedOffline || Number(req.body.offlineSales || 0), totalSales: orders.reduce((a,x) => a + Number(x.total || 0), 0) + (calculatedOffline || Number(req.body.offlineSales || 0)), notes: req.body.note || req.body.notes, submittedAt: new Date() } },
     { upsert: true, new: true, runValidators: true }
   );
   ok(res, closing, 'End-of-day report submitted');
