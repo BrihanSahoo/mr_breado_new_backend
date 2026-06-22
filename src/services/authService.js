@@ -30,8 +30,14 @@ async function repairSellerOutletAssignment(user) {
   }
 
   const or = [];
-  if (user.email) or.push({ email: String(user.email).trim().toLowerCase() });
-  if (user.phone) or.push({ managerPhone: String(user.phone).trim() });
+  if (user.email) {
+    const email = String(user.email).trim().toLowerCase();
+    or.push({ email }, { managerEmail: email });
+  }
+  if (user.phone) {
+    const phone = String(user.phone).trim();
+    or.push({ managerPhone: phone }, { phone });
+  }
   if (user.name) or.push({ managerName: String(user.name).trim() });
 
   if (!or.length) return null;

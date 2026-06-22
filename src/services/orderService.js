@@ -99,8 +99,16 @@ async function findCoupon({ code, subtotal, outletId, items, customerId, payment
 }
 
 function choosePrice(product, outletProduct, input) {
-  const selectedSize = String(input.selectedSize || input.selected_size || '').toLowerCase();
-  const selectedWeight = String(input.selectedWeight || input.selected_weight || '').toLowerCase().replace(/\s/g, '');
+  const customizations = Array.isArray(input.customizations) ? input.customizations : [];
+  const customizationValue = (pattern) => {
+    const found = customizations.find((item) => pattern.test(String(item.groupName || item.group || item.name || '')));
+    return String(found?.optionName || found?.option || found?.value || '').trim();
+  };
+  const rawSize = String(input.selectedSize || input.selected_size || customizationValue(/size/i) || '').trim().toLowerCase();
+  const rawWeight = String(input.selectedWeight || input.selected_weight || customizationValue(/weight/i) || '').trim().toLowerCase();
+  const selectedSize = rawSize.includes('small') ? 'small' : rawSize.includes('medium') ? 'medium' : rawSize.includes('large') ? 'large' : rawSize;
+  const compactWeight = rawWeight.replace(/\s/g, '');
+  const selectedWeight = compactWeight.includes('500') ? '500g' : compactWeight.includes('1.5') ? '1.5kg' : compactWeight.includes('2kg') || compactWeight === '2' ? '2kg' : compactWeight.includes('1kg') || compactWeight === '1' ? '1kg' : compactWeight;
   let price = Number(
     outletProduct.offerPriceOverride ?? outletProduct.priceOverride ??
     (Number(product.offerPrice || 0) > 0 ? product.offerPrice : product.basePrice) ?? 0

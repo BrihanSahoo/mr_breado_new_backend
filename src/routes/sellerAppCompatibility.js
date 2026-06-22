@@ -56,8 +56,14 @@ async function repairCurrentSellerAssignment(req) {
   if (req.user.role !== 'SELLER') return null;
 
   const or = [];
-  if (req.user.email) or.push({ email: String(req.user.email).trim().toLowerCase() });
-  if (req.user.phone) or.push({ managerPhone: String(req.user.phone).trim() });
+  if (req.user.email) {
+    const email = String(req.user.email).trim().toLowerCase();
+    or.push({ email }, { managerEmail: email });
+  }
+  if (req.user.phone) {
+    const phone = String(req.user.phone).trim();
+    or.push({ managerPhone: phone }, { phone });
+  }
   if (req.user.name) or.push({ managerName: String(req.user.name).trim() });
   if (!or.length) return null;
 
@@ -85,6 +91,10 @@ async function currentOutlet(req) {
   }
 
   let allowedIds = outletIdsFor(req.user);
+  if (allowedIds.length) {
+    const existing = await Outlet.find({ _id: { $in: allowedIds } }).select('_id').lean();
+    allowedIds = existing.map((item) => String(item._id));
+  }
   if (!allowedIds.length) {
     const repairedId = await repairCurrentSellerAssignment(req);
     if (repairedId) allowedIds = [String(repairedId)];
@@ -145,9 +155,11 @@ function orderQuery(req, outletId) {
   return q;
 }
 
-r.get(['/seller/restaurant', '/outlet-manager/me', '/outlet-manager/outlet'], ah(async (req, res) => {
+r.get(['/seller/restaurant', '/outlet-manager/me', '/outlet-manager/outlet', '/seller/session/outlet'], ah(async (req, res) => {
   const id = await currentOutlet(req);
-  ok(res, outletDto(await Outlet.findById(id).lean()));
+  const outlet = await Outlet.findById(id).lean();
+  if (!outlet) throw new AppError('Assigned outlet no longer exists. Ask the administrator to save outlet credentials again.', 403, 'ASSIGNED_OUTLET_NOT_FOUND');
+  ok(res, outletDto(outlet));
 }));
 
 r.put('/seller/restaurant', ah(async (req, res) => {

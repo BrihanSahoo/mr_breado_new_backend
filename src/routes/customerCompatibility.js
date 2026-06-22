@@ -122,6 +122,12 @@ async function cartForUser(userId) {
       id: item.legacyId ?? String(item._id),
       cartItemId: item.legacyId ?? String(item._id),
       cart_item_id: item.legacyId ?? String(item._id),
+      selectedSize: item.selectedSize || (item.customizations || []).find((c) => /size/i.test(String(c.groupName || '')))?.optionName || '',
+      selected_size: item.selectedSize || (item.customizations || []).find((c) => /size/i.test(String(c.groupName || '')))?.optionName || '',
+      selectedWeight: item.selectedWeight || (item.customizations || []).find((c) => /weight/i.test(String(c.groupName || '')))?.optionName || '',
+      selected_weight: item.selectedWeight || (item.customizations || []).find((c) => /weight/i.test(String(c.groupName || '')))?.optionName || '',
+      cakeMessage: item.cakeMessage || '',
+      cake_message: item.cakeMessage || '',
       product: {
         ...p,
         id: p.legacyId ?? String(p._id),
@@ -310,7 +316,9 @@ r.post('/cart/items', ah(async (req, res) => {
   let cart = await Cart.findOne({ customerId: req.user.id });
   if (cart && String(cart.outletId) !== String(outlet._id)) throw new AppError('Cart has items from a different outlet. Clear cart first.', 409);
   if (!cart) cart = new Cart({ customerId: req.user.id, outletId: outlet._id, items: [] });
-  const selectedLabel = text(req.body.selectedSize ?? req.body.selected_size ?? req.body.selectedWeight ?? req.body.selected_weight);
+  const selectedSize = text(req.body.selectedSize ?? req.body.selected_size);
+  const selectedWeight = text(req.body.selectedWeight ?? req.body.selected_weight);
+  const selectedLabel = selectedSize || selectedWeight;
   const requestedOptionIds = Array.isArray(req.body.customizationOptionIds ?? req.body.customization_option_ids) ? (req.body.customizationOptionIds ?? req.body.customization_option_ids).map(String) : [];
   const selectedCustomizations = [];
   for (const group of product.customizationGroups || []) {
@@ -323,9 +331,30 @@ r.post('/cart/items', ah(async (req, res) => {
   if (selectedLabel && !selectedCustomizations.length) throw new AppError('Selected food size or weight is not available', 400, 'INVALID_VARIANT');
   const cakeMessage = text(req.body.cakeMessage ?? req.body.cake_message);
   if (cakeMessage && product.cakeMessageEnabled) selectedCustomizations.push({ groupName: 'Cake Message Text', optionName: cakeMessage, price: Number(product.cakeMessageCharge || 0) });
-  const existing = cart.items.find((item) => String(item.productId) === String(product._id) && JSON.stringify(item.customizations || []) === JSON.stringify(selectedCustomizations));
-  if (existing) existing.quantity += quantity;
-  else cart.items.push({ productId: product._id, quantity, customizations: selectedCustomizations });
+  const normalizeVariant = (value) => text(value).toLowerCase().replace(/\s+/g, '');
+  const existing = cart.items.find((item) =>
+    String(item.productId) === String(product._id) &&
+    normalizeVariant(item.selectedSize) === normalizeVariant(selectedSize) &&
+    normalizeVariant(item.selectedWeight) === normalizeVariant(selectedWeight) &&
+    text(item.cakeMessage) === cakeMessage &&
+    JSON.stringify(item.customizations || []) === JSON.stringify(selectedCustomizations)
+  );
+  if (existing) {
+    existing.quantity += quantity;
+    existing.selectedSize = selectedSize;
+    existing.selectedWeight = selectedWeight;
+    existing.cakeMessage = cakeMessage;
+    existing.customizations = selectedCustomizations;
+  } else {
+    cart.items.push({
+      productId: product._id,
+      quantity,
+      selectedSize,
+      selectedWeight,
+      cakeMessage,
+      customizations: selectedCustomizations,
+    });
+  }
   await cart.save(); ok(res, await cartForUser(req.user.id), 'Cart updated', 201);
 }));
 r.put('/cart/items/:id', ah(async (req, res) => {
