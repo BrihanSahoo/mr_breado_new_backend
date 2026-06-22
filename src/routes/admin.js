@@ -7,9 +7,82 @@ r.get('/admin/dashboard',ah(async(req,res)=>{const [orders,revenue,outlets,custo
 r.route('/admin/outlets').get(ah(async(req,res)=>ok(res,await Outlet.find().sort({primary:-1,createdAt:-1}).lean()))).post(ah(async(req,res)=>ok(res,await Outlet.create({...req.body,slug:req.body.slug||`${slug(req.body.name)}-${nanoid(4)}`,location:{type:'Point',coordinates:[Number(req.body.longitude||0),Number(req.body.latitude||0)]},createdBy:req.user.id}),'Outlet created',201)));
 r.get('/admin/outlets/primary',ah(async(req,res)=>ok(res,await Outlet.findOne({primary:true}).lean())));
 r.patch('/admin/outlets/:id/primary',ah(async(req,res)=>{const session=await require('mongoose').startSession();let out;await session.withTransaction(async()=>{await Outlet.updateMany({primary:true},{$set:{primary:false}},{session});out=await Outlet.findByIdAndUpdate(req.params.id,{$set:{primary:true}},{new:true,session});});await session.endSession();ok(res,out,'Primary outlet updated')}));
-r.get('/admin/outlets/:id/full-dashboard',ah(async(req,res)=>{const id=req.params.id;const [outlet,inventory,orders,offline]=await Promise.all([Outlet.findById(id).lean(),OutletProduct.find({outletId:id}).populate('productId').lean(),Order.find({outletId:id}).lean(),OfflineSale.find({outletId:id}).lean()]);const delivered=orders.filter(x=>x.status==='DELIVERED');ok(res,{outlet,inventory,metrics:{orders:orders.length,totalSales:delivered.reduce((a,x)=>a+x.total,0)+offline.reduce((a,x)=>a+x.total,0),stockItems:inventory.length,lowStock:inventory.filter(x=>x.stockQuantity<=x.lowStockThreshold).length,offlineSales:offline.reduce((a,x)=>a+x.total,0)}})}));
-r.get('/admin/outlets/:id/available-products',ah(async(req,res)=>{const [products,assigned]=await Promise.all([Product.find({active:true}).populate('categoryId').lean(),OutletProduct.find({outletId:req.params.id}).lean()]);const map=new Map(assigned.map(x=>[String(x.productId),x]));ok(res,{all:products.map(p=>({...p,outletInventory:map.get(String(p._id))||null})),items:assigned})}));
-r.post('/admin/outlets/:id/stock',ah(async(req,res)=>{const items=req.body.items||req.body.products||[];for(const i of items){const productId=i.productId||i.foodId;const stock=Math.max(0,Number(i.stockQuantity??i.stock??i.quantity??0));await OutletProduct.findOneAndUpdate({outletId:req.params.id,productId},{$set:{enabled:i.enabled??i.selected??true,available:stock>0,stockQuantity:stock}},{upsert:true,new:true,runValidators:true});}ok(res,await OutletProduct.find({outletId:req.params.id}).populate('productId'),'Outlet stock saved');}));
+r.get('/admin/outlets/:id/full-dashboard',ah(async(req,res)=>{
+  const id=req.params.id;
+  const from=req.query.from?new Date(`${req.query.from}T00:00:00.000Z`):new Date(new Date().setHours(0,0,0,0));
+  const to=req.query.to?new Date(`${req.query.to}T23:59:59.999Z`):new Date();
+  if(Number.isNaN(from.getTime())||Number.isNaN(to.getTime())||from>to)throw new AppError('Invalid dashboard date range',400,'INVALID_DATE_RANGE');
+  const range={createdAt:{$gte:from,$lte:to}};
+  const [outlet,inventory,orders,offline,closings,stockMovements]=await Promise.all([
+    Outlet.findById(id).lean(),
+    OutletProduct.find({outletId:id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean(),
+    Order.find({outletId:id,...range}).populate('customerId riderId').sort({createdAt:-1}).lean(),
+    OfflineSale.find({outletId:id,...range}).sort({createdAt:-1}).lean(),
+    DailyClosing.find({outletId:id,businessDate:{$gte:from.toISOString().slice(0,10),$lte:to.toISOString().slice(0,10)}}).sort({businessDate:1}).lean(),
+    InventoryMovement.find({outletId:id,createdAt:{$gte:from,$lte:to}}).populate('productId').sort({createdAt:-1}).limit(100).lean()
+  ]);
+  if(!outlet)throw new AppError('Outlet not found',404);
+  const delivered=orders.filter(x=>x.status==='DELIVERED');
+  const cancelled=orders.filter(x=>['CANCELLED','REJECTED'].includes(x.status));
+  const active=orders.filter(x=>!['DELIVERED','CANCELLED','REJECTED','REFUNDED'].includes(x.status));
+  const onlineSales=delivered.filter(x=>['ONLINE','WALLET','TAKEAWAY_ADVANCE'].includes(x.paymentMethod)).reduce((a,x)=>a+Number(x.paidAmount||x.total||0),0);
+  const codSales=delivered.filter(x=>x.paymentMethod==='COD').reduce((a,x)=>a+Number(x.total||0),0);
+  const offlineSales=offline.reduce((a,x)=>a+Number(x.total||0),0);
+  const deliveredSales=delivered.reduce((a,x)=>a+Number(x.total||0),0);
+  const discount=delivered.reduce((a,x)=>a+Number(x.discount||0),0);
+  const tax=delivered.reduce((a,x)=>a+Number(x.tax||0),0);
+  const deliveryFees=delivered.reduce((a,x)=>a+Number(x.deliveryCharge||0),0);
+  const refunds=orders.reduce((a,x)=>a+(String(x.refundStatus||'').toUpperCase()==='PROCESSED'?Number(x.paidAmount||0):0),0);
+  const availableStock=inventory.reduce((a,x)=>a+Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0)),0);
+  const reservedStock=inventory.reduce((a,x)=>a+Number(x.reservedQuantity||0),0);
+  const lowStockRows=inventory.filter(x=>Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))<=Number(x.lowStockThreshold||0));
+  const acceptanceTimes=orders.filter(x=>x.acceptedAt).map(x=>(new Date(x.acceptedAt)-new Date(x.createdAt))/60000).filter(Number.isFinite);
+  const pickupTimes=orders.filter(x=>x.pickedUpAt&&x.readyAt).map(x=>(new Date(x.pickedUpAt)-new Date(x.readyAt))/60000).filter(Number.isFinite);
+  const dayMap=new Map();
+  const addDay=(date,values)=>{const key=new Date(date).toISOString().slice(0,10);const row=dayMap.get(key)||{date:key,orders:0,onlineSales:0,codSales:0,offlineSales:0,totalSales:0};Object.keys(values).forEach(k=>row[k]=(row[k]||0)+Number(values[k]||0));dayMap.set(key,row);};
+  orders.forEach(x=>addDay(x.createdAt,{orders:1,onlineSales:['ONLINE','WALLET','TAKEAWAY_ADVANCE'].includes(x.paymentMethod)&&x.status==='DELIVERED'?Number(x.paidAmount||x.total||0):0,codSales:x.paymentMethod==='COD'&&x.status==='DELIVERED'?Number(x.total||0):0,totalSales:x.status==='DELIVERED'?Number(x.total||0):0}));
+  offline.forEach(x=>addDay(x.createdAt,{offlineSales:Number(x.total||0),totalSales:Number(x.total||0)}));
+  const itemSales=new Map();delivered.forEach(o=>(o.items||[]).forEach(i=>{const key=String(i.productId||i.name);const row=itemSales.get(key)||{productId:i.productId,productName:i.name||'Food item',soldQuantity:0,revenue:0};row.soldQuantity+=Number(i.quantity||0);row.revenue+=Number(i.finalTotal||i.unitPrice*i.quantity||0);itemSales.set(key,row);}));
+  const ranked=[...itemSales.values()].sort((a,b)=>b.soldQuantity-a.soldQuantity);
+  const statusBreakdown=Object.entries(orders.reduce((m,x)=>(m[x.status]=(m[x.status]||0)+1,m),{})).map(([status,count])=>({status,count}));
+  const paymentBreakdown=[{method:'ONLINE',amount:onlineSales},{method:'COD',amount:codSales},{method:'OFFLINE',amount:offlineSales}];
+  const stockValue=inventory.reduce((a,x)=>a+(Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))*Number(x.priceOverride??x.productId?.offerPrice??x.productId?.basePrice??0)),0);
+  const summary={orders:orders.length,totalOrders:orders.length,activeOrders:active.length,deliveredOrders:delivered.length,cancelledOrders:cancelled.length,totalSales:deliveredSales+offlineSales,onlineSales,codSales,offlineSales,discount,tax,deliveryFees,refunds,averageOrderValue:delivered.length?deliveredSales/delivered.length:0,stockItems:inventory.length,totalStock:inventory.reduce((a,x)=>a+Number(x.stockQuantity||0),0),reservedStock,availableStock,lowStock:lowStockRows.length,outOfStock:inventory.filter(x=>Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))===0).length,availableProducts:inventory.filter(x=>x.enabled&&x.available&&Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))>0).length,stockValue,sellerAcceptanceMinutes:acceptanceTimes.length?acceptanceTimes.reduce((a,x)=>a+x,0)/acceptanceTimes.length:0,riderPickupMinutes:pickupTimes.length?pickupTimes.reduce((a,x)=>a+x,0)/pickupTimes.length:0};
+  const closingCalendar=closings.map(x=>({id:String(x._id),closingDate:x.businessDate,closing_date:x.businessDate,onlineSales:Number(x.onlineSales||0),online_sales:Number(x.onlineSales||0),codSales:Number(x.codSales||0),cod_sales:Number(x.codSales||0),offlineSales:Number(x.offlineSales||0),offline_sales:Number(x.offlineSales||0),totalSales:Number(x.totalSales||0),total_sales:Number(x.totalSales||0),status:x.status}));
+  const movementRows=stockMovements.map(x=>({id:String(x._id),createdAt:x.createdAt,created_at:x.createdAt,productName:x.productId?.name||'Food item',movementType:x.type,movement_type:x.type,beforeStock:x.quantityBefore,before_stock:x.quantityBefore,afterStock:x.quantityAfter,after_stock:x.quantityAfter,note:x.reason||''}));
+  ok(res,{outlet,inventory,orders:orders.slice(0,100),recentOrders:orders.slice(0,12),offlineSalesRows:offline,closings,closingCalendar,stockMovements:movementRows,summary,metrics:summary,salesByDay:[...dayMap.values()].sort((a,b)=>a.date.localeCompare(b.date)),statusBreakdown,paymentBreakdown,topFoods:ranked.slice(0,10),bestFoods:ranked.slice(0,10),slowFoods:ranked.slice().reverse().slice(0,10),lowStock:lowStockRows});
+}));
+r.get('/admin/outlets/:id/available-products',ah(async(req,res)=>{
+  const [products,assigned]=await Promise.all([
+    Product.find({active:true}).populate('categoryId brandId').sort({name:1}).lean(),
+    OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean()
+  ]);
+  const map=new Map(assigned.map(x=>[String(x.productId?._id||x.productId),x]));
+  const all=products.map(p=>{const row=map.get(String(p._id));return {...p,productId:String(p._id),assigned:Boolean(row),outletInventory:row||null,stockQuantity:Number(row?.stockQuantity||0),reservedQuantity:Number(row?.reservedQuantity||0),availableStock:Math.max(0,Number(row?.stockQuantity||0)-Number(row?.reservedQuantity||0)),enabled:row?.enabled??false,available:row?.available??false,lowStockThreshold:Number(row?.lowStockThreshold||5),priceOverride:row?.priceOverride,offerPriceOverride:row?.offerPriceOverride,preparationMinutes:Number(row?.preparationMinutes||20)};});
+  ok(res,{all,assigned,items:assigned});
+}));
+r.post('/admin/outlets/:id/stock',ah(async(req,res)=>{
+  const items=req.body.items||req.body.products||[];
+  if(!Array.isArray(items)||!items.length)throw new AppError('At least one outlet product is required',400,'OUTLET_PRODUCTS_REQUIRED');
+  for(const i of items){
+    const productId=i.productId||i.foodId||i.id;
+    if(!productId)throw new AppError('Product id is required',400,'PRODUCT_ID_REQUIRED');
+    const stock=Number(i.stockQuantity??i.stock??i.quantity??0);
+    if(!Number.isFinite(stock)||stock<0)throw new AppError('Stock quantity must be zero or greater',400,'INVALID_STOCK');
+    const enabled=i.enabled??i.selected??i.isEnabled??true;
+    const available=i.available??i.isAvailable??(stock>0);
+    const lowStockThreshold=Number(i.lowStockThreshold??i.lowStockAlert??i.low_stock_alert??5);
+    const preparationMinutes=Number(i.preparationMinutes??i.preparation_minutes??20);
+    const update={enabled:Boolean(enabled),available:Boolean(available)&&stock>0,stockQuantity:stock,lowStockThreshold:Number.isFinite(lowStockThreshold)&&lowStockThreshold>=0?lowStockThreshold:5,preparationMinutes:Number.isFinite(preparationMinutes)&&preparationMinutes>=0?preparationMinutes:20};
+    if(i.priceOverride!==undefined||i.price!==undefined)update.priceOverride=Math.max(0,Number(i.priceOverride??i.price));
+    if(i.offerPriceOverride!==undefined||i.offerPrice!==undefined)update.offerPriceOverride=Math.max(0,Number(i.offerPriceOverride??i.offerPrice));
+    const existing=await OutletProduct.findOne({outletId:req.params.id,productId});
+    const before=Number(existing?.stockQuantity||0);
+    const row=await OutletProduct.findOneAndUpdate({outletId:req.params.id,productId},{$set:update,$inc:{version:1}},{upsert:true,new:true,runValidators:true,setDefaultsOnInsert:true});
+    if(before!==stock)await InventoryMovement.create({outletId:req.params.id,productId,type:'MANUAL_ADJUSTMENT',quantityBefore:before,quantityChanged:stock-before,quantityAfter:stock,reservedBefore:Number(existing?.reservedQuantity||0),reservedAfter:Number(row.reservedQuantity||0),referenceType:'ADMIN_STOCK_UPDATE',reason:i.note||'Admin updated outlet inventory',performedBy:req.user.id,idempotencyKey:req.headers['idempotency-key']?`${req.headers['idempotency-key']}:${productId}`:`admin-stock:${req.params.id}:${productId}:${Date.now()}`});
+  }
+  ok(res,await OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean(),'Outlet stock saved');
+}));
 r.route('/admin/categories').get(ah(async(req,res)=>ok(res,(await Category.find().sort({sortOrder:1}).lean()).map(categoryOut)))).post(ah(async(req,res)=>{const body={...req.body};if(typeof body.image==='string')body.image={url:body.image};const created=await Category.create({...body,slug:body.slug||`${slug(body.name)}-${nanoid(4)}`});ok(res,categoryOut(created),'Category created',201)}));
 r.put('/admin/categories/:id',ah(async(req,res)=>{const body={...req.body};if(typeof body.image==='string')body.image={url:body.image};ok(res,categoryOut(await Category.findByIdAndUpdate(req.params.id,body,{new:true,runValidators:true})))}));r.patch('/admin/categories/:id/status',ah(async(req,res)=>ok(res,categoryOut(await Category.findByIdAndUpdate(req.params.id,{active:req.body.active},{new:true})))));r.delete('/admin/categories/:id',ah(async(req,res)=>{await Category.findByIdAndDelete(req.params.id);ok(res,null,'Category deleted')}));
 async function resolveCategoryForProduct(body){
@@ -38,7 +111,7 @@ r.route('/admin/products').get(ah(async(req,res)=>ok(res,(await Product.find().p
 r.get(['/admin/products/catalog','/admin/foods'],ah(async(req,res)=>ok(res,(await Product.find().populate('categoryId').lean()).map(productOut))));
 r.put('/admin/products/:id',ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const payload=await productPayload(req.body,existing);const product=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId').lean();ok(res,productOut(product),'Product updated')}));
 r.delete('/admin/products/:id',ah(async(req,res)=>{await Product.findByIdAndUpdate(req.params.id,{active:false});ok(res,null,'Product disabled')}));
-r.post('/admin/outlet-managers',ah(async(req,res)=>{const password=String(req.body.password||'');if(password.length<8)throw new AppError('Password must contain at least 8 characters');const u=await User.create({name:req.body.name,email:req.body.email?.toLowerCase(),phone:req.body.phone,passwordHash:await bcrypt.hash(password,12),role:'SELLER',assignedOutletIds:req.body.outletIds||[req.body.outletId].filter(Boolean)});ok(res,u,'Outlet manager created',201)}));
+r.post('/admin/outlet-managers',ah(async(req,res)=>{const password=String(req.body.password||'');if(password.length<8)throw new AppError('Password must contain at least 8 characters');const identity=String(req.body.username||req.body.email||req.body.phone||'').trim();if(!identity)throw new AppError('Username, email or phone is required',400,'SELLER_IDENTITY_REQUIRED');const u=await User.create({name:req.body.name,username:req.body.username?.trim().toLowerCase(),email:req.body.email?.trim().toLowerCase()||undefined,phone:req.body.phone?.trim()||undefined,passwordHash:await bcrypt.hash(password,12),role:'SELLER',assignedOutletIds:req.body.outletIds||[req.body.outletId].filter(Boolean)});ok(res,u,'Outlet manager created',201)}));
 r.get('/admin/outlet-managers',ah(async(req,res)=>ok(res,await User.find({role:'SELLER'}).select('-passwordHash').populate('assignedOutletIds').lean())));r.patch('/admin/outlet-managers/:id',ah(async(req,res)=>ok(res,await User.findByIdAndUpdate(req.params.id,{$set:{name:req.body.name,phone:req.body.phone,email:req.body.email,assignedOutletIds:req.body.outletIds,active:req.body.active}},{new:true}))));
 r.get('/admin/orders',ah(async(req,res)=>{const q={};if(req.query.outletId)q.outletId=req.query.outletId;if(req.query.status)q.status=req.query.status;ok(res,await Order.find(q).populate('customerId outletId riderId').sort({createdAt:-1}).lean())}));
 r.get('/admin/transactions',ah(async(req,res)=>{const q={};if(req.query.outletId)q.outletId=req.query.outletId;if(req.query.status)q.status=req.query.status;ok(res,await Payment.find(q).populate('orderId customerId outletId').sort({createdAt:-1}).lean())}));
