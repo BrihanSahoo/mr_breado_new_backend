@@ -220,7 +220,7 @@ async function createOrder({ customerId, outletId, items, address, fulfilmentTyp
         balanceDue: pricing.fulfilmentType === 'TAKEAWAY' ? pricing.balanceDue : 0,
         takeawayAdvancePercentage: pricing.takeawayAdvancePercentage, distanceKm: pricing.distanceKm,
         couponCode: pricing.couponCode,
-        sellerAcceptanceDeadline: new Date(Date.now() + Math.max(1, Number(env.autoCancel.sellerMinutes || 30)) * 60000),
+        sellerAcceptanceDeadline: new Date(Date.now() + Math.max(1, Number(requiresOnline ? env.autoCancel.paymentMinutes : env.autoCancel.sellerMinutes || 60)) * 60000),
       }], { session });
       await inventory.reserve(pricing.snapshots, outletId, order._id, customerId, session, `order:${order._id}`);
       if (pricing.coupon?._id && pricing.couponCode) {
@@ -235,11 +235,12 @@ async function createOrder({ customerId, outletId, items, address, fulfilmentTyp
   return order;
 }
 
-async function changeStatus(order, user, nextStatus, reason, idempotencyKey) {
+async function changeStatus(order, user, nextStatus, reason, idempotencyKey, options = {}) {
   const next = canonical(nextStatus);
   const previous = canonical(order.status);
   if (previous === next) return order;
-  if (!(transitions[previous] || []).includes(next)) throw new AppError(`Invalid transition ${previous} -> ${next}`, 409, 'INVALID_STATUS_TRANSITION');
+  const forceCancel = next === 'CANCELLED' && (options.force === true || String(user?.role || '').toUpperCase() === 'ADMIN');
+  if (!forceCancel && !(transitions[previous] || []).includes(next)) throw new AppError(`Invalid transition ${previous} -> ${next}`, 409, 'INVALID_STATUS_TRANSITION');
   if (order.fulfilmentType === 'TAKEAWAY' && ['RIDER_ASSIGNMENT_PENDING', 'RIDER_ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'REACHED_DROP'].includes(next)) throw new AppError('A takeaway order cannot be assigned to a rider', 409, 'TAKEAWAY_RIDER_NOT_ALLOWED');
   if (next === 'DELIVERED' && order.fulfilmentType === 'TAKEAWAY' && Number(order.balanceDue || 0) > 0 && Number(order.paidAmount || 0) < Number(order.total || 0)) throw new AppError('Collect and record the remaining takeaway amount before completion', 409, 'TAKEAWAY_BALANCE_DUE');
 
@@ -247,8 +248,8 @@ async function changeStatus(order, user, nextStatus, reason, idempotencyKey) {
   try {
     await session.withTransaction(async () => {
       order.status = next;
-      if (next === 'ACCEPTED') order.acceptedAt = new Date();
-      if (next === 'READY') { order.readyAt = new Date(); if (order.fulfilmentType === 'DELIVERY') order.riderAcceptanceDeadline = new Date(Date.now() + Math.max(1, Number(env.autoCancel.riderMinutes || 30)) * 60000); }
+      if (next === 'ACCEPTED') { order.acceptedAt = new Date(); order.sellerAcceptanceDeadline = null; }
+      if (next === 'READY') { order.readyAt = new Date(); order.sellerAcceptanceDeadline = null; if (order.fulfilmentType === 'DELIVERY') order.riderAcceptanceDeadline = new Date(Date.now() + Math.max(1, Number(env.autoCancel.riderMinutes || 60)) * 60000); }
       if (next === 'PICKED_UP') { order.pickedUpAt = new Date(); order.riderAcceptanceDeadline = null; }
       if (next === 'OUT_FOR_DELIVERY') order.outForDeliveryAt = new Date();
       if (next === 'REACHED_DROP') order.reachedDropAt = new Date();

@@ -1,2 +1,13 @@
-const connectDb=require('../db/connect');const {Order,User}=require('../models');const orderService=require('../services/orderService');
-async function run(){await connectDb();const now=new Date();const orders=await Order.find({$or:[{status:'RECEIVED',sellerAcceptanceDeadline:{$lte:now}},{status:{$in:['READY','RIDER_ASSIGNMENT_PENDING']},riderAcceptanceDeadline:{$lte:now}}]});const system={id:null,role:'ADMIN'};for(const o of orders){try{await orderService.changeStatus(o,system,'CANCELLED',o.status==='RECEIVED'?'Seller acceptance timeout':'Rider acceptance timeout',`auto-cancel:${o._id}`);}catch(e){if(e.code!==11000)console.error(e.message)}}console.log(`Auto-cancel processed ${orders.length} candidate orders`);process.exit(0)}run().catch(e=>{console.error(e);process.exit(1)});
+const connectDb = require('../db/connect');
+const { runAutoCancel } = require('../services/autoCancelService');
+
+(async () => {
+  await connectDb();
+  const result = await runAutoCancel();
+  console.log(`Auto-cancel processed ${result.candidates} candidates and cancelled ${result.cancelled} orders`);
+  if (result.failures.length) console.error(result.failures);
+  process.exit(result.failures.length ? 1 : 0);
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

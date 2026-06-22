@@ -30,7 +30,7 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
   const order = await resolveOrder(orderOrId);
   const isFinal = order.status === 'DELIVERED';
   const isPaidTakeaway = order.fulfilmentType === 'TAKEAWAY' && Number(order.paidAmount || 0) > 0;
-  if (!isFinal && !isPaidTakeaway) throw new AppError('Invoice is available after delivery or after takeaway advance payment', 409, 'INVOICE_NOT_READY');
+  const documentTitle = isFinal ? 'TAX INVOICE' : (isPaidTakeaway ? 'TAKEAWAY PAYMENT RECEIPT' : 'ORDER RECEIPT');
 
   const invoice = await Invoice.findOneAndUpdate(
     { orderId: order._id },
@@ -48,7 +48,7 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
   d.pipe(res);
   d.fontSize(22).text('MR. BREADO', { align: 'center' });
   d.fontSize(9).text(text(outlet.name, 'Official Outlet'), { align: 'center' });
-  d.fontSize(10).text('TAX INVOICE', { align: 'center' }).moveDown(0.5);
+  d.fontSize(10).text(documentTitle, { align: 'center' }).moveDown(0.5);
   d.fontSize(9).text(addressLine(outlet.address), { align: 'center' });
   d.text(`GSTIN: ${text(outlet.gstin, 'Not provided')}`, { align: 'center' }).moveDown();
 
@@ -87,8 +87,7 @@ async function stream(orderOrId, maybeUserOrRes, maybeRes) {
     .text(`Razorpay payment ID: ${text(payment?.gatewayPaymentId)}`)
     .text(`Fulfilment: ${text(order.fulfilmentType)}`)
     .text(`Outlet: ${text(outlet.name)} (${text(outlet.code)})`)
-    .moveDown().fontSize(8).text('Mr. Breado branding: https://res.cloudinary.com/dswsz53xi/image/upload/v1781831035/mr-breado/brands/qogzsdj39ywandrw1g9f.png', { align: 'center' })
-    .text('This is a computer-generated invoice.', { align: 'center' });
+    .moveDown().fontSize(8).text(isFinal ? 'This is a computer-generated tax invoice.' : 'This is a computer-generated order receipt. The final tax invoice is generated after completion.', { align: 'center' });
   d.end();
 }
 

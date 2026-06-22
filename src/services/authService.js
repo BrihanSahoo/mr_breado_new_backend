@@ -23,14 +23,23 @@ function token(user) {
 async function repairSellerOutletAssignment(user) {
   if (normalizeRole(user.role) !== 'SELLER') return null;
 
+  // The explicit Outlet.managerUserId binding is authoritative. This avoids
+  // stale assignedOutletIds pointing a valid seller account at another outlet.
+  const direct = await Outlet.findOne({ managerUserId: user._id }).sort({ updatedAt: -1 });
+  if (direct) {
+    const current = (user.assignedOutletIds || []).map(String);
+    if (current.length !== 1 || current[0] !== String(direct._id)) {
+      user.assignedOutletIds = [direct._id];
+      await user.save();
+    }
+    return direct;
+  }
+
   const existingIds = (user.assignedOutletIds || []).map(String);
   if (existingIds.length) {
     const existingOutlet = await Outlet.findById(existingIds[0]);
     if (existingOutlet) return existingOutlet;
   }
-
-  const direct=await Outlet.findOne({managerUserId:user._id}).sort({updatedAt:-1});
-  if(direct){ user.assignedOutletIds=[direct._id]; await user.save(); return direct; }
 
   const or = [];
   if (user.email) {

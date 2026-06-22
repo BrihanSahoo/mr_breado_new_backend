@@ -16,6 +16,8 @@ const orderService = require('../services/orderService');
 const invoiceService = require('../services/invoiceService');
 const { buildVariantFields, serializeVariantFields } = require('../utils/productVariants');
 const deliveryService = require('../services/deliveryService');
+const { findOneCompat, resolveObjectId } = require('../utils/compatId');
+const { Notification } = require('../models');
 
 const r = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (_req,file,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) });
@@ -63,7 +65,7 @@ const normalizeOrder = (o) => o ? ({
   id: String(o._id), orderId: String(o._id), orderNumber: o.slug,
   customer: o.customerId, customerName: o.customerId?.name,
   customerMobile: o.customerId?.phone, customerEmail: o.customerId?.email,
-  outlet: o.outletId, outletName: o.outletId?.name, restaurantName: o.outletId?.name,
+  outlet: o.outletId && typeof o.outletId==='object' ? normalizeOutlet(o.outletId) : o.outletId, outletName: o.outletId?.name, restaurantName: o.outletId?.name,
   rider: o.riderId, riderName: o.riderId?.name,
   grandTotal: o.total, paymentType: o.paymentMethod, orderType: o.fulfilmentType,
   deliveryAddress: [o.address?.line1,o.address?.area,o.address?.city,o.address?.state,o.address?.pincode].filter(Boolean).join(', '),
@@ -231,7 +233,9 @@ r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{
   if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AppError('Enter a valid outlet manager email address.',400,'INVALID_EMAIL');
   if(phone&&!/^\+?[0-9]{8,15}$/.test(phone)) throw new AppError('Enter a valid outlet manager phone number.',400,'INVALID_PHONE');
 
-  let user=await User.findOne({role:'SELLER',assignedOutletIds:outletId}).select('+passwordHash');
+  let user=null;
+  if(outlet.managerUserId) user=await User.findOne({_id:outlet.managerUserId,role:'SELLER'}).select('+passwordHash');
+  if(!user) user=await User.findOne({role:'SELLER',assignedOutletIds:outletId}).select('+passwordHash');
   const identities=[];
   if(username) identities.push({username});
   if(email) identities.push({email});
@@ -252,6 +256,9 @@ r.post('/admin/outlets/:id/credentials', ah(async(req,res)=>{
   user.assignedOutletIds=[outletId];
   user.active=true;
   await user.save();
+  // An outlet has exactly one manager account. Remove this outlet from stale
+  // seller assignments so future logins cannot resolve ambiguously.
+  await User.updateMany({_id:{$ne:user._id},role:'SELLER',assignedOutletIds:outletId},{$pull:{assignedOutletIds:outletId}});
 
   outlet.managerName=user.name;
   outlet.managerUserId=user._id;
@@ -283,21 +290,15 @@ r.put('/admin/selected-outlet', ah(async(req,res)=>{
   ok(res,{outletId:String(outlet._id),outlet:normalizeOutlet(outlet)},'Admin operating outlet updated');
 }));
 
-r.post('/admin/orders/:id/cancel', ah(async(req,res)=>{
-  const order=await Order.findById(req.params.id);
+async function adminCancelOrder(req,res){
+  const order=await findOneCompat(Order,req.params.id);
   if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
-  if(['DELIVERED','CANCELLED','REJECTED'].includes(String(order.status).toUpperCase())) throw new AppError('This order is already final and cannot be cancelled',409,'ORDER_FINAL');
+  if(['DELIVERED','CANCELLED','REJECTED','REFUNDED'].includes(String(order.status).toUpperCase())) throw new AppError('This order is already final and cannot be cancelled',409,'ORDER_FINAL');
   const reason=String(req.body.reason||'Cancelled by administrator').trim()||'Cancelled by administrator';
-  const changed=await orderService.changeStatus(order,req.user,'CANCELLED',reason,req.headers['idempotency-key']||`${req.id}:ADMIN_CANCEL`);
+  const changed=await orderService.changeStatus(order,req.user,'CANCELLED',reason,req.headers['idempotency-key']||`${req.id}:ADMIN_CANCEL`,{force:true});
   ok(res,normalizeOrder(changed.toObject?.()||changed),'Order cancelled');
-}));
-r.post('/admin/mr-breado/orders/:id/cancel', ah(async(req,res)=>{
-  const order=await Order.findById(req.params.id);
-  if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
-  if(['DELIVERED','CANCELLED','REJECTED'].includes(String(order.status).toUpperCase())) throw new AppError('This order is already final and cannot be cancelled',409,'ORDER_FINAL');
-  const changed=await orderService.changeStatus(order,req.user,'CANCELLED','Cancelled by administrator',req.headers['idempotency-key']||`${req.id}:ADMIN_CANCEL`);
-  ok(res,normalizeOrder(changed.toObject?.()||changed),'Order cancelled');
-}));
+}
+r.post(['/admin/orders/:id/cancel','/admin/mr-breado/orders/:id/cancel','/admin/orders/:id/reject'], ah(adminCancelOrder));
 
 r.get(['/admin/outlets/:id/performance','/admin/outlets/:id/calendar'], ah(async(req,res)=>{const orders=await Order.find({outletId:req.params.id}).lean();ok(res,{orders:orders.length,delivered:orders.filter(x=>x.status==='DELIVERED').length,cancelled:orders.filter(x=>x.status==='CANCELLED').length,revenue:orders.filter(x=>x.status==='DELIVERED').reduce((a,x)=>a+Number(x.total||0),0),items:orders})}));
 
@@ -332,9 +333,26 @@ r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
 r.post('/admin/api-keys/validate-google', ah(async(req,res)=>ok(res,await settings.validateIntegration('google_maps_credentials'),'Google Maps API key is valid')));
 
 r.get(['/admin/mr-breado/orders','/admin/orders/:id'], ah(async(req,res,next)=>{if(req.params.id){const o=await Order.findById(req.params.id).populate('customerId outletId riderId').lean();if(!o)throw new AppError('Order not found',404);return ok(res,normalizeOrder(o));}return ok(res,(await Order.find().populate('customerId outletId riderId').sort({createdAt:-1}).lean()).map(normalizeOrder));}));
-for(const [suffix,status] of [['accept','ACCEPTED'],['preparing','PREPARING'],['ready','READY'],['reject','REJECTED']]) r.post(`/admin/mr-breado/orders/:id/${suffix}`,ah(async(req,res)=>{const o=await Order.findById(req.params.id);if(!o)throw new AppError('Order not found',404);ok(res,normalizeOrder((await orderService.changeStatus(o,req.user,status,req.body.reason,req.headers['idempotency-key']||`${req.id}:${status}`)).toObject?.()||o))}));
-r.get(['/admin/mr-breado/orders/:id/invoice.pdf','/admin/orders/:id/invoice.pdf'], ah(async(req,res)=>invoiceService.stream(req.params.id,req.user,res)));
-r.post('/admin/mr-breado/orders/:id/invoice/send-to-customer', ah(async(req,res)=>{const inv=await Invoice.findOne({orderId:req.params.id});ok(res,inv||{orderId:req.params.id,status:'READY'},'Invoice ready for customer download')}));
+for(const [suffix,status] of [['accept','ACCEPTED'],['preparing','PREPARING'],['prep','PREPARING'],['ready','READY'],['reject','REJECTED']]) {
+  r.post([`/admin/mr-breado/orders/:id/${suffix}`,`/admin/orders/:id/${suffix}`],ah(async(req,res)=>{
+    const o=await findOneCompat(Order,req.params.id);
+    if(!o)throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
+    const force=status==='REJECTED'&&String(req.user.role).toUpperCase()==='ADMIN';
+    const changed=await orderService.changeStatus(o,req.user,status,req.body.reason,req.headers['idempotency-key']||`${req.id}:${status}`,{force});
+    ok(res,normalizeOrder(changed.toObject?.()||changed));
+  }));
+}
+r.get(['/admin/mr-breado/orders/:id/invoice.pdf','/admin/orders/:id/invoice.pdf','/admin/orders/:id/invoice'], ah(async(req,res)=>{
+  const order=await findOneCompat(Order,req.params.id);
+  if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
+  return invoiceService.stream(order,req.user,res);
+}));
+r.post(['/admin/mr-breado/orders/:id/invoice/send-to-customer','/admin/orders/:id/invoice/send-to-customer','/admin/orders/:id/send-invoice'], ah(async(req,res)=>{
+  const order=await findOneCompat(Order,req.params.id);
+  if(!order) throw new AppError('Order not found',404,'ORDER_NOT_FOUND');
+  await Notification.create({userId:order.customerId,outletId:order.outletId,role:'CUSTOMER',title:'Order receipt ready',message:`Your receipt for ${order.slug} is ready to download.`,type:'INVOICE_READY',data:{orderId:String(order._id),orderSlug:order.slug}});
+  ok(res,{orderId:String(order._id),orderSlug:order.slug,status:'READY'},'Receipt sent to customer');
+}));
 
 r.get('/admin/online-transactions', ah(async(req,res)=>ok(res,await Payment.find().populate('orderId customerId outletId').sort({createdAt:-1}).lean())));
 r.get('/admin/online-transactions/:id', ah(async(req,res)=>ok(res,await Payment.findById(req.params.id).populate('orderId customerId outletId').lean())));

@@ -127,7 +127,12 @@ async function currentOutlet(req) {
 async function orderForUser(req) {
   const order = await findOneCompat(Order, req.params.id);
   if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
-  ensureOutlet(req.user, order.outletId);
+  if (req.user.role !== 'ADMIN') {
+    const outletId = await currentOutlet(req);
+    if (String(order.outletId) !== String(outletId)) {
+      throw new AppError('Outlet access denied', 403, 'OUTLET_ACCESS_DENIED');
+    }
+  }
   return order;
 }
 function productDto(row) {
@@ -162,7 +167,7 @@ function orderQuery(req, outletId) {
   return q;
 }
 
-r.get(['/seller/restaurant', '/outlet-manager/me', '/outlet-manager/outlet', '/seller/session/outlet'], ah(async (req, res) => {
+r.get(['/seller/restaurant', '/seller/me', '/seller/profile', '/outlet-manager/profile', '/outlet-manager/me', '/outlet-manager/outlet', '/seller/session/outlet'], ah(async (req, res) => {
   const id = await currentOutlet(req);
   const outlet = await Outlet.findById(id).lean();
   if (!outlet) throw new AppError('Assigned outlet no longer exists. Ask the administrator to save outlet credentials again.', 403, 'ASSIGNED_OUTLET_NOT_FOUND');

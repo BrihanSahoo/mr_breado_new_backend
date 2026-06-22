@@ -123,13 +123,22 @@ async function applySuccessfulPayment(payment, gatewayPaymentId, signature, rawM
     },
   }, opts);
 
-  await Order.updateOne({ _id: order._id }, {
-    $set: {
-      paymentStatus: balanceDue > 0 ? 'PARTIALLY_PAID' : 'SUCCESS',
-      paidAmount: aggregatePaid,
-      balanceDue,
-    },
-  }, opts);
+  const orderUpdate = {
+    paymentStatus: balanceDue > 0 ? 'PARTIALLY_PAID' : 'SUCCESS',
+    paidAmount: aggregatePaid,
+    balanceDue,
+  };
+  // An online order must enter the seller queue immediately after successful
+  // payment. Previously it remained PENDING_PAYMENT forever, which also kept
+  // the customer's active-order lock in place.
+  if (order.status === 'PENDING_PAYMENT') {
+    orderUpdate.status = 'RECEIVED';
+    const env = require('../config/env');
+    orderUpdate.sellerAcceptanceDeadline = new Date(
+      Date.now() + Math.max(1, Number(env.autoCancel.sellerMinutes || 60)) * 60_000,
+    );
+  }
+  await Order.updateOne({ _id: order._id }, { $set: orderUpdate }, opts);
 }
 
 async function verify(body, user) {
