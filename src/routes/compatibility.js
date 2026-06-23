@@ -47,8 +47,8 @@ r.get(['/delivery/profile','/rider/profile'],allowRoles('RIDER','ADMIN'),ah(asyn
 r.get(['/delivery/orders/:id','/rider/orders/:id'],allowRoles('RIDER','ADMIN'),ah(async(req,res)=>{const q={_id:req.params.id};if(req.user.role==='RIDER')q.riderId=req.user.id;ok(res,await Order.findOne(q).populate('outletId customerId'))}));
 r.get(['/delivery/cash/summary','/rider/cash/summary'],allowRoles('RIDER','ADMIN'),ah(async(req,res)=>ok(res,{collected:0,deposited:0,pending:0})));
 
-r.post('/seller/verification/request',allowRoles('SELLER'),ah(async(req,res)=>ok(res,await VerificationRequest.create({userId:req.user.id,outletId:req.body.outletId,type:'SELLER',documents:req.body.documents||[],note:req.body.note}),'Verification submitted',201)));
-r.get('/seller/verification/status',allowRoles('SELLER'),ah(async(req,res)=>ok(res,await VerificationRequest.findOne({userId:req.user.id,type:'SELLER'}).sort({createdAt:-1}).lean())));
+r.post(['/seller/verification/request','/rider/verification/request'],allowRoles('SELLER','RIDER'),ah(async(req,res)=>ok(res,await VerificationRequest.create({userId:req.user.id,outletId:req.body.outletId,type:req.user.role,documents:req.body.documents||[],note:req.body.note}),'Verification submitted',201)));
+r.get(['/seller/verification/status','/rider/verification/status'],allowRoles('SELLER','RIDER'),ah(async(req,res)=>ok(res,await VerificationRequest.findOne({userId:req.user.id}).sort({createdAt:-1}).lean())));
 
 r.use('/admin',allowRoles('ADMIN'));
 function adminPayload(path,body){const out={...body};const raw=body.imageUrl||body.image_url||body.image||body.banner||body.bannerImage;if(raw)out.image=typeof raw==='string'?{url:raw}:raw;if(path==='offers'||path==='coupons'){if(out.code)out.code=String(out.code).trim().toUpperCase();if(out.startDate&&!out.startAt)out.startAt=out.startDate;if(out.endDate&&!out.endAt)out.endAt=out.endDate;if(out.freeDelivery===true&&!out.type)out.type='FREE_DELIVERY';}if(path==='banners'&&(out.couponCode||out.code)){out.actionType='COUPON';out.actionValue=out.couponCode||out.code;}return out;}
