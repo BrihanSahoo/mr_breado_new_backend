@@ -199,6 +199,7 @@ async function dashboard(req, rider) {
     RiderEarning.aggregate([{ $match: { riderId: rider._id } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     cashSummary(rider),
   ]);
+  const riderConfig = await settings.get('rider');
   const [verificationRequest, pendingPayoutAgg, paidPayoutAgg] = await Promise.all([
     VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' }).sort({ createdAt: -1 }).lean(),
     RiderEarning.aggregate([{ $match: { riderId: rider._id, status: 'PENDING' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
@@ -219,6 +220,15 @@ async function dashboard(req, rider) {
     verification_status: rider.riderProfile?.verificationStatus || 'UNVERIFIED',
     verificationRequest: verificationRequest ? { id: String(verificationRequest._id), status: verificationRequest.status, documents: verificationRequest.documents, createdAt: verificationRequest.createdAt } : null,
     verificationSubmitted: Boolean(verificationRequest),
+    verificationApproved: ['VERIFIED','APPROVED','ACTIVE'].includes(String(rider.riderProfile?.verificationStatus || '').toUpperCase()),
+    verificationRejected: String(rider.riderProfile?.verificationStatus || '').toUpperCase() === 'REJECTED',
+    verificationReviewedAt: verificationRequest?.reviewedAt || null,
+    perKmRate: Number(riderConfig?.perKmRate || riderConfig?.earningsPerKm || 0),
+    per_km_rate: Number(riderConfig?.perKmRate || riderConfig?.earningsPerKm || 0),
+    minimumDeliveryPay: Number(riderConfig?.minimumDeliveryPay || 0),
+    minimum_delivery_pay: Number(riderConfig?.minimumDeliveryPay || 0),
+    assignmentRadiusKm: Number(riderConfig?.assignmentRadiusKm ?? riderConfig?.deliveryOfferRadiusKm ?? 8),
+    assignment_radius_km: Number(riderConfig?.assignmentRadiusKm ?? riderConfig?.deliveryOfferRadiusKm ?? 8),
     pendingPayout: Number(pendingPayoutAgg[0]?.total || 0),
     pending_payout: Number(pendingPayoutAgg[0]?.total || 0),
     paidEarnings: Number(paidPayoutAgg[0]?.total || 0),
@@ -511,12 +521,24 @@ async function uploadDocument(file) {
   return { url: `data:${file.mimetype};base64,${file.buffer.toString('base64')}`, alt: file.originalname };
 }
 
-router.get('/rider/verification/status', ah(async (req, res) => {
+router.get(['/rider/verification/status', '/delivery/verification/status'], ah(async (req, res) => {
   const rider = await getRider(req);
   const request = await VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' }).sort({ createdAt: -1 });
-  ok(res, request || { status: rider.riderProfile?.verificationStatus || 'UNVERIFIED' });
+  const profileStatus = String(rider.riderProfile?.verificationStatus || 'UNVERIFIED').toUpperCase();
+  ok(res, {
+    id: request ? String(request._id) : null,
+    status: profileStatus,
+    requestStatus: request?.status || null,
+    documents: request?.documents || [],
+    createdAt: request?.createdAt || null,
+    reviewedAt: request?.reviewedAt || null,
+    note: request?.note || '',
+    verified: ['VERIFIED','APPROVED','ACTIVE'].includes(profileStatus),
+    pending: profileStatus === 'PENDING' || request?.status === 'PENDING',
+    rejected: profileStatus === 'REJECTED' || request?.status === 'REJECTED',
+  });
 }));
-router.post(['/rider/verification/:riderId', '/rider/verification/request'], upload.fields([{ name: 'aadhaarFront', maxCount: 1 }, { name: 'aadhaarBack', maxCount: 1 }, { name: 'drivingLicense', maxCount: 1 }, { name: 'vehicleRc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }]), ah(async (req, res) => {
+router.post(['/rider/verification/:riderId', '/rider/verification/request', '/delivery/verification/request'], upload.fields([{ name: 'aadhaarFront', maxCount: 1 }, { name: 'aadhaarBack', maxCount: 1 }, { name: 'drivingLicense', maxCount: 1 }, { name: 'vehicleRc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }]), ah(async (req, res) => {
   const rider = await getRider(req);
   if (req.params.riderId && String(req.params.riderId) !== String(rider.legacyId) && String(req.params.riderId) !== String(rider._id) && req.user.role !== 'ADMIN') throw new AppError('Cannot submit verification for another rider', 403);
 
