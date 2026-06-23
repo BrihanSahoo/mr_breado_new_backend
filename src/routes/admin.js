@@ -4,7 +4,7 @@ const slug=s=>String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').repl
 const categoryOut=c=>{if(!c)return c;const raw=typeof c.toObject==='function'?c.toObject():c;const url=typeof raw.image==='string'?raw.image:(raw.image?.url||'');return {...raw,id:String(raw._id),title:raw.name,image:url,imageUrl:url,icon:url,status:raw.active?'ACTIVE':'INACTIVE',enabled:Boolean(raw.active)};};
 
 r.get('/admin/dashboard',ah(async(req,res)=>{const [orders,revenue,outlets,customers]=await Promise.all([Order.countDocuments(),Order.aggregate([{$match:{status:'DELIVERED'}},{$group:{_id:null,total:{$sum:'$total'}}}]),Outlet.countDocuments(),User.countDocuments({role:'CUSTOMER'})]);ok(res,{totalOrders:orders,totalSales:revenue[0]?.total||0,totalOutlets:outlets,totalCustomers:customers})}));
-r.route('/admin/outlets').get(ah(async(req,res)=>ok(res,await Outlet.find().sort({primary:-1,createdAt:-1}).lean()))).post(ah(async(req,res)=>ok(res,await Outlet.create({...req.body,slug:req.body.slug||`${slug(req.body.name)}-${nanoid(4)}`,location:{type:'Point',coordinates:[Number(req.body.longitude||0),Number(req.body.latitude||0)]},createdBy:req.user.id}),'Outlet created',201)));
+r.route('/admin/outlets').get(ah(async(req,res)=>ok(res,await Outlet.find().sort({primary:-1,createdAt:-1}).lean()))).post(ah(async(req,res)=>ok(res,await Outlet.create({...req.body,open:req.body.open===true,slug:req.body.slug||`${slug(req.body.name)}-${nanoid(4)}`,location:{type:'Point',coordinates:[Number(req.body.longitude||0),Number(req.body.latitude||0)]},createdBy:req.user.id}),'Outlet created',201)));
 r.get('/admin/outlets/primary',ah(async(req,res)=>ok(res,await Outlet.findOne({primary:true}).lean())));
 r.patch('/admin/outlets/:id/primary',ah(async(req,res)=>{const session=await require('mongoose').startSession();let out;await session.withTransaction(async()=>{await Outlet.updateMany({primary:true},{$set:{primary:false}},{session});out=await Outlet.findByIdAndUpdate(req.params.id,{$set:{primary:true}},{new:true,session});});await session.endSession();ok(res,out,'Primary outlet updated')}));
 r.get('/admin/outlets/:id/full-dashboard',ah(async(req,res)=>{
@@ -67,21 +67,15 @@ r.post('/admin/outlets/:id/stock',ah(async(req,res)=>{
   for(const i of items){
     const productId=i.productId||i.foodId||i.id;
     if(!productId)throw new AppError('Product id is required',400,'PRODUCT_ID_REQUIRED');
-    const stock=Number(i.stockQuantity??i.stock??i.quantity??0);
-    if(!Number.isFinite(stock)||stock<0)throw new AppError('Stock quantity must be zero or greater',400,'INVALID_STOCK');
     const enabled=i.enabled??i.selected??i.isEnabled??true;
-    const available=i.available??i.isAvailable??(stock>0);
-    const lowStockThreshold=Number(i.lowStockThreshold??i.lowStockAlert??i.low_stock_alert??5);
-    const preparationMinutes=Number(i.preparationMinutes??i.preparation_minutes??20);
-    const update={enabled:Boolean(enabled),available:Boolean(available)&&stock>0,stockQuantity:stock,lowStockThreshold:Number.isFinite(lowStockThreshold)&&lowStockThreshold>=0?lowStockThreshold:5,preparationMinutes:Number.isFinite(preparationMinutes)&&preparationMinutes>=0?preparationMinutes:20};
-    if(i.priceOverride!==undefined||i.price!==undefined)update.priceOverride=Math.max(0,Number(i.priceOverride??i.price));
-    if(i.offerPriceOverride!==undefined||i.offerPrice!==undefined)update.offerPriceOverride=Math.max(0,Number(i.offerPriceOverride??i.offerPrice));
     const existing=await OutletProduct.findOne({outletId:req.params.id,productId});
-    const before=Number(existing?.stockQuantity||0);
-    const row=await OutletProduct.findOneAndUpdate({outletId:req.params.id,productId},{$set:update,$inc:{version:1}},{upsert:true,new:true,runValidators:true,setDefaultsOnInsert:true});
-    if(before!==stock)await InventoryMovement.create({outletId:req.params.id,productId,type:'MANUAL_ADJUSTMENT',quantityBefore:before,quantityChanged:stock-before,quantityAfter:stock,reservedBefore:Number(existing?.reservedQuantity||0),reservedAfter:Number(row.reservedQuantity||0),referenceType:'ADMIN_STOCK_UPDATE',reason:i.note||'Admin updated outlet inventory',performedBy:req.user.id,idempotencyKey:req.headers['idempotency-key']?`${req.headers['idempotency-key']}:${productId}`:`admin-stock:${req.params.id}:${productId}:${Date.now()}`});
+    if(!enabled){ if(existing) await OutletProduct.updateOne({_id:existing._id},{$set:{enabled:false,available:false}}); continue; }
+    const update={enabled:true};
+    if(existing){ update.available=Boolean(existing.available)&&Number(existing.stockQuantity||0)>0; }
+    else { Object.assign(update,{available:false,stockQuantity:0,reservedQuantity:0,stockInitialized:false,lowStockThreshold:5,preparationMinutes:20}); }
+    await OutletProduct.findOneAndUpdate({outletId:req.params.id,productId},{$set:update,$inc:{version:1}},{upsert:true,new:true,runValidators:true,setDefaultsOnInsert:true});
   }
-  ok(res,await OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean(),'Outlet stock saved');
+  ok(res,await OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean(),'Outlet products updated');
 }));
 r.route('/admin/categories').get(ah(async(req,res)=>ok(res,(await Category.find().sort({sortOrder:1}).lean()).map(categoryOut)))).post(ah(async(req,res)=>{const body={...req.body};if(typeof body.image==='string')body.image={url:body.image};const created=await Category.create({...body,slug:body.slug||`${slug(body.name)}-${nanoid(4)}`});ok(res,categoryOut(created),'Category created',201)}));
 r.put('/admin/categories/:id',ah(async(req,res)=>{const body={...req.body};if(typeof body.image==='string')body.image={url:body.image};ok(res,categoryOut(await Category.findByIdAndUpdate(req.params.id,body,{new:true,runValidators:true})))}));r.patch('/admin/categories/:id/status',ah(async(req,res)=>ok(res,categoryOut(await Category.findByIdAndUpdate(req.params.id,{active:req.body.active},{new:true})))));r.delete('/admin/categories/:id',ah(async(req,res)=>{await Category.findByIdAndDelete(req.params.id);ok(res,null,'Category deleted')}));
@@ -117,6 +111,9 @@ r.get('/admin/orders',ah(async(req,res)=>{const q={};if(req.query.outletId)q.out
 r.get('/admin/transactions',ah(async(req,res)=>{const q={};if(req.query.outletId)q.outletId=req.query.outletId;if(req.query.status)q.status=req.query.status;ok(res,await Payment.find(q).populate('orderId customerId outletId').sort({createdAt:-1}).lean())}));
 r.get('/admin/refunds',ah(async(req,res)=>ok(res,await Refund.find(req.query.status?{status:req.query.status}:{}).populate('orderId customerId outletId paymentId').sort({createdAt:-1}).lean())));r.patch('/admin/refunds/:id',ah(async(req,res)=>ok(res,await Refund.findByIdAndUpdate(req.params.id,{$set:{status:req.body.status,adminAcknowledgement:req.body.refunded===true,adminNote:req.body.note,processedBy:req.user.id,processedAt:['PROCESSED','REJECTED'].includes(req.body.status)?new Date():null}},{new:true}))));
 r.get(['/admin/settings','/admin/application-settings','/admin/payment-settings'],ah(async(req,res)=>ok(res,await settings.adminSettings())));
+
+r.get('/admin/outlets/:id/daily-reports',ah(async(req,res)=>ok(res,await DailyClosing.find({outletId:req.params.id}).populate('sellerId').populate('stockSnapshot.productId').sort({businessDate:-1,submittedAt:-1}).lean())));
+r.get('/admin/outlets/:id/daily-reports/:reportId',ah(async(req,res)=>{const row=await DailyClosing.findOne({_id:req.params.reportId,outletId:req.params.id}).populate('sellerId').populate('stockSnapshot.productId').lean();if(!row)throw new AppError('Daily report not found',404,'DAILY_REPORT_NOT_FOUND');ok(res,row); }));
 r.get(['/admin/settings/business-features','/admin/feature-settings','/admin/takeaway-settings'],ah(async(req,res)=>ok(res,await settings.getBusinessFeatures())));
 r.put(['/admin/settings/business-features','/admin/feature-settings','/admin/takeaway-settings'],ah(async(req,res)=>ok(res,await settings.setBusinessFeatures(req.body,req.user.id,{requestId:req.id||req.headers['x-request-id']}),'Business features updated')));
 r.patch(['/admin/settings/online-payment/status','/admin/payment-settings/status'],ah(async(req,res)=>ok(res,await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.enabled},req.user.id,{requestId:req.id||req.headers['x-request-id']}),'Online payment status updated')));

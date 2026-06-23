@@ -157,6 +157,11 @@ function productDto(row) {
     stock_quantity: Number(row.stockQuantity || 0),
     isAvailable: Boolean(row.available && row.enabled),
     available: Boolean(row.available && row.enabled),
+    availableStock: Math.max(0, Number(row.stockQuantity||0)-Number(row.reservedQuantity||0)),
+    lowStock: Math.max(0, Number(row.stockQuantity||0)-Number(row.reservedQuantity||0)) < Number(row.lowStockThreshold||5),
+    outOfStock: Math.max(0, Number(row.stockQuantity||0)-Number(row.reservedQuantity||0)) === 0,
+    lowStockThreshold: Number(row.lowStockThreshold||5),
+    stockInitialized: Boolean(row.stockInitialized),
   };
 }
 function orderQuery(req, outletId) {
@@ -184,10 +189,15 @@ r.put('/seller/restaurant', ah(async (req, res) => {
   ok(res, await Outlet.findByIdAndUpdate(id, { $set: update }, { new: true, runValidators: true }), 'Outlet updated');
 }));
 
-r.patch('/seller/restaurant/status', ah(async (req, res) => {
+r.patch(['/seller/restaurant/status','/outlet-manager/outlet/status','/seller/outlet/status'], ah(async (req, res) => {
   const id = await currentOutlet(req);
   const open = Boolean(req.body.open ?? req.body.is_open ?? req.body.isOpen);
-  ok(res, await Outlet.findByIdAndUpdate(id, { $set: { open } }, { new: true }), open ? 'Outlet opened' : 'Outlet closed');
+  if(!open) throw new AppError('Submit the daily sales report before closing the outlet.',409,'DAILY_REPORT_REQUIRED');
+  const outlet=await requireBusinessReady(id);
+  const updated=await Outlet.findByIdAndUpdate(id, { $set: { open:true } }, { new: true });
+  const rows=await OutletProduct.find({outletId:id,enabled:true}).populate('productId').lean();
+  const alerts=rows.filter(x=>Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))<Number(x.lowStockThreshold||5)).map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item',availableStock:Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0)),threshold:Number(x.lowStockThreshold||5)}));
+  ok(res,{outlet:outletDto(updated),stockAlerts:alerts},alerts.length?'Outlet opened with low-stock alerts':'Outlet opened');
 }));
 
 r.get(['/seller/products','/outlet-manager/products'], ah(async (req, res) => {
@@ -216,6 +226,9 @@ r.put('/seller/products/:id', ah(async (req, res) => {
       const before = row.stockQuantity;
       row.stockQuantity = stockQuantity;
       row.available = stockQuantity > 0;
+      row.stockInitialized = true;
+      row.lastStockUpdatedAt = new Date();
+      row.lastStockUpdatedBy = req.user.id;
       await row.save({ session });
       await InventoryMovement.create([{ outletId, productId, type: 'MANUAL_ADJUSTMENT', quantityBefore: before, quantityChanged: stockQuantity-before, quantityAfter: stockQuantity, reservedBefore: row.reservedQuantity, reservedAfter: row.reservedQuantity, referenceType: 'SELLER_STOCK_UPDATE', reason: req.body.note || 'Seller real-time stock update', performedBy: req.user.id, idempotencyKey: req.headers['idempotency-key'] || `seller-stock:${outletId}:${productId}:${Date.now()}` }], { session });
     });
@@ -243,7 +256,7 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
       if (!productId) throw new AppError('Product not found', 404);
       const after = Number(item.stockQuantity ?? item.stock ?? 0);
       if (!Number.isFinite(after) || after < 0) throw new AppError('Invalid stock quantity', 400);
-      const row = await OutletProduct.findOneAndUpdate({ outletId, productId }, { $set: { stockQuantity: after, available: after > 0 } }, { new: true }).populate('productId');
+      const row = await OutletProduct.findOneAndUpdate({ outletId, productId }, { $set: { stockQuantity: after, available: after > 0, stockInitialized:true, lastStockUpdatedAt:new Date(), lastStockUpdatedBy:req.user.id } }, { new: true }).populate('productId');
       if (!row) throw new AppError('Product is not assigned to this outlet', 404);
       results.push(productDto(row));
     }
@@ -262,6 +275,9 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
       if (!Number.isFinite(after) || after < 0) throw new AppError('Invalid stock quantity', 400);
       row.stockQuantity = after;
       row.available = after > 0;
+      row.stockInitialized = true;
+      row.lastStockUpdatedAt = new Date();
+      row.lastStockUpdatedBy = req.user.id;
       await row.save({ session });
       await InventoryMovement.create([{ outletId, productId, type: 'MANUAL_ADJUSTMENT', quantityBefore: before, quantityChanged: after - before, quantityAfter: after, reservedBefore: row.reservedQuantity, reservedAfter: row.reservedQuantity, referenceType: 'SELLER_STOCK_UPDATE', reason: req.body.note || 'Seller stock update', performedBy: req.user.id, idempotencyKey: req.headers['idempotency-key'] || `seller-stock:${outletId}:${productId}:${Date.now()}` }], { session });
     });
@@ -270,6 +286,8 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
   ok(res, productDto(row), 'Stock updated');
 }));
 
+
+r.get(['/seller/stock-summary','/outlet-manager/stock-summary','/seller/startup-stock'],ah(async(req,res)=>{const outletId=await currentOutlet(req);const rows=await OutletProduct.find({outletId,enabled:true}).populate('productId').sort({updatedAt:-1});const items=rows.map(productDto);ok(res,{items,total:items.length,needsInitialStock:items.some(x=>!x.stockInitialized),lowStockItems:items.filter(x=>x.lowStock),outOfStockItems:items.filter(x=>x.outOfStock)}); }));
 r.get(['/seller/orders','/outlet-manager/orders'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
   await requireBusinessReady(outletId);
@@ -400,24 +418,31 @@ r.get('/outlet-manager/stock-ledger', ah(async (req, res) => {
   ok(res, await InventoryMovement.find({ outletId }).populate('productId').sort({ createdAt: -1 }).limit(500).lean());
 }));
 
-r.post(['/outlet-manager/close-day','/outlet-manager/day-close','/outlet-manager/end-of-day'], ah(async (req, res) => {
+r.post(['/outlet-manager/close-day','/outlet-manager/day-close','/outlet-manager/end-of-day','/seller/day-close','/seller/end-of-day'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
   await requireBusinessReady(outletId);
   const businessDate = req.body.businessDate || req.body.date || new Date().toISOString().slice(0,10);
-  const inventory = await OutletProduct.find({ outletId }).lean();
-  const start = new Date(`${businessDate}T00:00:00.000Z`);
-  const end = new Date(`${businessDate}T23:59:59.999Z`);
-  const [orders, offline] = await Promise.all([
-    Order.find({ outletId, status: 'DELIVERED', deliveredAt: { $gte: start, $lte: end } }).lean(),
-    OfflineSale.find({ outletId, createdAt: { $gte: start, $lte: end } }).lean(),
+  const inventory = await OutletProduct.find({ outletId, enabled:true }).lean();
+  const requested=Array.isArray(req.body.items)?req.body.items:[];
+  const byId=new Map(requested.map(x=>[String(x.productId||x.id),x]));
+  const start = new Date(`${businessDate}T00:00:00.000Z`), end = new Date(`${businessDate}T23:59:59.999Z`);
+  const [orders, offline, firstMoves, previousClosing] = await Promise.all([
+    Order.find({ outletId, status:'DELIVERED', deliveredAt:{ $gte:start,$lte:end } }).lean(),
+    OfflineSale.find({ outletId, createdAt:{ $gte:start,$lte:end } }).lean(),
+    InventoryMovement.aggregate([{ $match:{outletId:new mongoose.Types.ObjectId(String(outletId)),createdAt:{$gte:start,$lte:end}}},{ $sort:{createdAt:1}},{ $group:{_id:'$productId',openingStock:{$first:'$quantityBefore'}}}]),
+    DailyClosing.findOne({outletId,businessDate:{$lt:businessDate}}).sort({businessDate:-1}).lean(),
   ]);
-  const calculatedOffline = offline.reduce((a,x) => a + Number(x.total || 0), 0);
-  const closing = await DailyClosing.findOneAndUpdate(
-    { outletId, businessDate },
-    { $set: { sellerId: req.user.id, stockSnapshot: inventory.map((x) => ({ productId: x.productId, stockQuantity: x.stockQuantity, reservedQuantity: x.reservedQuantity })), onlineSales: orders.reduce((a,x) => a + Number(x.total || 0), 0), offlineSales: calculatedOffline || Number(req.body.offlineSales || 0), totalSales: orders.reduce((a,x) => a + Number(x.total || 0), 0) + (calculatedOffline || Number(req.body.offlineSales || 0)), notes: req.body.note || req.body.notes, submittedAt: new Date() } },
-    { upsert: true, new: true, runValidators: true }
-  );
-  ok(res, closing, 'End-of-day report submitted');
+  const moveMap=new Map(firstMoves.map(x=>[String(x._id),Number(x.openingStock||0)]));
+  const prevMap=new Map((previousClosing?.stockSnapshot||[]).map(x=>[String(x.productId),Number(x.stockQuantity||0)]));
+  const stockSnapshot=inventory.map(x=>{const input=byId.get(String(x.productId));const closingStock=Number(input?.stockQuantity??input?.stock??x.stockQuantity??0);return{productId:x.productId,openingStock:Number(moveMap.get(String(x.productId))??prevMap.get(String(x.productId))??x.stockQuantity??0),stockQuantity:closingStock,reservedQuantity:Number(x.reservedQuantity||0),availableStock:Math.max(0,closingStock-Number(x.reservedQuantity||0)),lowStockThreshold:Number(x.lowStockThreshold||5)};});
+  const onlineSales=orders.filter(x=>['ONLINE','WALLET','TAKEAWAY_ADVANCE'].includes(x.paymentMethod)).reduce((a,x)=>a+Number(x.paidAmount||x.total||0),0);
+  const codSales=orders.filter(x=>x.paymentMethod==='COD').reduce((a,x)=>a+Number(x.total||0),0);
+  const recordedOffline=offline.reduce((a,x)=>a+Number(x.total||0),0);
+  const offlineCashSales=Number(req.body.offlineCashSales??req.body.cashSales??0),offlineUpiSales=Number(req.body.offlineUpiSales??req.body.upiSales??0),offlineCardSales=Number(req.body.offlineCardSales??req.body.cardSales??0),offlineOtherSales=Number(req.body.offlineOtherSales??req.body.otherSales??0);
+  const offlineSales=Math.max(recordedOffline,Number(req.body.offlineSales||0),offlineCashSales+offlineUpiSales+offlineCardSales+offlineOtherSales);
+  const session=await mongoose.startSession();let closing;
+  try{await session.withTransaction(async()=>{for(const snap of stockSnapshot){await OutletProduct.updateOne({outletId,productId:snap.productId},{$set:{stockQuantity:snap.stockQuantity,available:snap.availableStock>0,stockInitialized:true,lastStockUpdatedAt:new Date(),lastStockUpdatedBy:req.user.id}},{session});}closing=await DailyClosing.findOneAndUpdate({outletId,businessDate},{$set:{sellerId:req.user.id,stockSnapshot,onlineSales,codSales,offlineSales,offlineCashSales,offlineUpiSales,offlineCardSales,offlineOtherSales,offlineOrderCount:Number(req.body.offlineOrderCount||0),refunds:Number(req.body.refunds||0),expenses:Number(req.body.expenses||0),totalSales:onlineSales+codSales+offlineSales,status:'SUBMITTED',notes:req.body.notes||req.body.note||'',submittedAt:new Date()}},{upsert:true,new:true,runValidators:true,session,setDefaultsOnInsert:true});await Outlet.updateOne({_id:outletId},{$set:{open:false}},{session});});}finally{await session.endSession();}
+  ok(res,{closing,outletOpen:false},'Daily sales report submitted and outlet closed');
 }));
 
 r.get('/seller/reviews', ah(async (req, res) => {
