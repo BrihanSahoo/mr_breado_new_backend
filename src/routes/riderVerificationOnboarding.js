@@ -5,7 +5,7 @@ const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
 const { requireAuth } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
-const { User, VerificationRequest, Notification } = require('../models');
+const { User, VerificationRequest, Notification, RiderLocation } = require('../models');
 const { normalizeRole } = require('../utils/roles');
 
 const router = express.Router();
@@ -46,6 +46,34 @@ function assertApplicant(user) {
   // Any authenticated non-seller account may apply. Verification approval still
   // controls online/offers access, so this does not grant delivery privileges.
   return role;
+}
+
+
+
+async function synchronizeApprovedRider(user) {
+  const latest = await VerificationRequest.findOne({ userId: user._id, type: 'RIDER' }).sort({ createdAt: -1 });
+  const requestStatus = String(latest?.status || '').trim().toUpperCase();
+  const profileStatus = String(user.riderProfile?.verificationStatus || '').trim().toUpperCase();
+  const approved = ['VERIFIED', 'APPROVED', 'ACTIVE'].includes(requestStatus) || ['VERIFIED', 'APPROVED', 'ACTIVE'].includes(profileStatus);
+
+  if (approved) {
+    let changed = false;
+    if (String(user.role || '').toUpperCase() !== 'RIDER') {
+      user.role = 'RIDER';
+      changed = true;
+    }
+    if (!user.riderProfile) {
+      user.riderProfile = {};
+      changed = true;
+    }
+    if (String(user.riderProfile.verificationStatus || '').toUpperCase() !== 'VERIFIED') {
+      user.riderProfile.verificationStatus = 'VERIFIED';
+      changed = true;
+    }
+    if (changed) await user.save();
+  }
+
+  return { latest, approved };
 }
 
 router.use('/rider-verification', requireAuth);
@@ -128,5 +156,64 @@ router.post('/rider-verification/submit', upload.fields([
     verified: false,
   }, 'Rider verification submitted', 201);
 }));
+
+
+// Unique runtime availability endpoint. It is mounted before all legacy rider
+// routers, so old role/status middleware cannot intercept a verified rider.
+router.post('/rider-runtime/availability', requireAuth, ah(async (req, res) => {
+  const rider = await User.findById(req.user.id);
+  if (!rider) throw new AppError('Rider account not found', 404, 'RIDER_NOT_FOUND');
+  if (String(rider.role || '').toUpperCase() === 'SELLER') {
+    throw new AppError('Seller accounts cannot use rider availability', 403, 'RIDER_ACTION_NOT_ALLOWED');
+  }
+
+  const { approved } = await synchronizeApprovedRider(rider);
+  const requestedOnline = Boolean(req.body.online ?? req.body.isOnline ?? req.body.is_online);
+  const requestedAvailable = Boolean(req.body.available ?? req.body.isAvailable ?? req.body.is_available ?? requestedOnline);
+
+  if ((requestedOnline || requestedAvailable) && !approved) {
+    throw new AppError('Admin verification is required before going online', 409, 'RIDER_NOT_VERIFIED');
+  }
+
+  const latitude = Number(req.body.latitude ?? req.body.lat);
+  const longitude = Number(req.body.longitude ?? req.body.lng ?? req.body.lon);
+  if (requestedOnline && (!Number.isFinite(latitude) || !Number.isFinite(longitude))) {
+    throw new AppError('Current location is required before going online', 400, 'RIDER_LOCATION_REQUIRED');
+  }
+
+  if (!rider.riderProfile) rider.riderProfile = {};
+  rider.riderProfile.online = requestedOnline;
+  rider.riderProfile.available = requestedOnline && requestedAvailable;
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    rider.riderProfile.currentLatitude = latitude;
+    rider.riderProfile.currentLongitude = longitude;
+    rider.riderProfile.lastLocationAt = new Date();
+  }
+  await rider.save();
+
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    await RiderLocation.create({
+      riderId: rider._id,
+      location: { type: 'Point', coordinates: [longitude, latitude] },
+      heading: Number(req.body.heading ?? req.body.headingDegrees ?? 0),
+      speed: Number(req.body.speed ?? req.body.speedMetersPerSecond ?? 0),
+      accuracy: Number(req.body.accuracy ?? req.body.accuracyMeters ?? 0),
+      recordedAt: new Date(),
+    });
+  }
+
+  ok(res, {
+    id: rider.legacyId || String(rider._id),
+    mongoId: String(rider._id),
+    online: Boolean(rider.riderProfile.online),
+    available: Boolean(rider.riderProfile.available),
+    verificationStatus: rider.riderProfile.verificationStatus || 'VERIFIED',
+    verification_status: rider.riderProfile.verificationStatus || 'VERIFIED',
+    currentLatitude: rider.riderProfile.currentLatitude,
+    currentLongitude: rider.riderProfile.currentLongitude,
+    lastLocationAt: rider.riderProfile.lastLocationAt,
+  }, requestedOnline ? 'Rider is online' : 'Rider is offline');
+}));
+
 
 module.exports = router;
