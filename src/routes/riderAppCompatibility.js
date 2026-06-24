@@ -32,6 +32,154 @@ const upload = multer({
   },
 });
 
+// Verification/onboarding routes intentionally run before the strict rider-only gate.
+// A person may already have a CUSTOMER account and then apply to become a rider.
+// They are authenticated here, promoted to RIDER with PENDING verification, and still
+// cannot go online or receive orders until an administrator verifies them.
+async function requireRiderVerificationApplicant(req, _res, next) {
+  try {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role === 'SELLER') {
+      throw new AppError('Seller accounts cannot submit rider verification', 403, 'RIDER_APPLICATION_NOT_ALLOWED');
+    }
+    if (!['CUSTOMER', 'RIDER', 'ADMIN'].includes(role)) {
+      throw new AppError('This account cannot submit rider verification', 403, 'RIDER_APPLICATION_NOT_ALLOWED');
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+router.use([
+  '/rider/verification/status',
+  '/delivery/verification/status',
+  '/rider/onboarding/verification/status',
+  '/rider/verification/request',
+  '/delivery/verification/request',
+  '/rider/onboarding/verification',
+], requireAuth, requireRiderVerificationApplicant);
+
+router.get([
+  '/rider/verification/status',
+  '/delivery/verification/status',
+  '/rider/onboarding/verification/status',
+], ah(async (req, res) => {
+  let rider;
+  if (req.user.role === 'ADMIN' && req.query.riderId) {
+    rider = await findOneCompat(User, req.query.riderId, { role: 'RIDER' });
+  } else {
+    rider = await User.findById(req.user.id);
+  }
+  if (!rider) throw new AppError('Account not found', 404, 'ACCOUNT_NOT_FOUND');
+
+  const request = await VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' })
+    .sort({ createdAt: -1 });
+  const status = String(request?.status || rider.riderProfile?.verificationStatus || 'UNVERIFIED').toUpperCase();
+  ok(res, request || {
+    status,
+    requestStatus: status,
+    verified: ['VERIFIED', 'APPROVED', 'ACTIVE'].includes(status),
+    pending: status === 'PENDING',
+    rejected: status === 'REJECTED',
+    documents: [],
+  });
+}));
+
+router.post([
+  '/rider/verification/:riderId',
+  '/rider/verification/request',
+  '/delivery/verification/request',
+  '/rider/onboarding/verification',
+], upload.fields([
+  { name: 'aadhaarFront', maxCount: 1 },
+  { name: 'aadhaarBack', maxCount: 1 },
+  { name: 'drivingLicense', maxCount: 1 },
+  { name: 'vehicleRc', maxCount: 1 },
+  { name: 'profilePhoto', maxCount: 1 },
+]), ah(async (req, res) => {
+  let rider = await User.findById(req.user.id);
+  if (!rider) throw new AppError('Account not found', 404, 'ACCOUNT_NOT_FOUND');
+
+  if (req.params.riderId &&
+      String(req.params.riderId) !== String(rider.legacyId) &&
+      String(req.params.riderId) !== String(rider._id) &&
+      req.user.role !== 'ADMIN') {
+    throw new AppError('Cannot submit verification for another rider', 403, 'RIDER_APPLICATION_NOT_ALLOWED');
+  }
+
+  const currentRole = String(rider.role || '').toUpperCase();
+  if (currentRole === 'SELLER') {
+    throw new AppError('Seller accounts cannot submit rider verification', 403, 'RIDER_APPLICATION_NOT_ALLOWED');
+  }
+
+  const requiredFields = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc', 'profilePhoto'];
+  const missing = requiredFields.filter((field) => !(req.files?.[field]?.length));
+  if (missing.length) {
+    throw new AppError(
+      `Missing required verification documents: ${missing.join(', ')}`,
+      400,
+      'VERIFICATION_DOCUMENTS_REQUIRED',
+    );
+  }
+
+  const current = await VerificationRequest.findOne({
+    userId: rider._id,
+    type: 'RIDER',
+    status: 'PENDING',
+  }).sort({ createdAt: -1 });
+  if (current) {
+    throw new AppError(
+      'A rider verification request is already pending admin review',
+      409,
+      'VERIFICATION_ALREADY_PENDING',
+    );
+  }
+
+  const documents = [];
+  for (const [field, files] of Object.entries(req.files || {})) {
+    for (const file of files) {
+      const doc = await uploadDocument(file);
+      if (doc) documents.push({ ...doc, alt: field });
+    }
+  }
+
+  // An existing customer account may apply to become a rider. Promotion does not
+  // grant delivery access: verification remains PENDING and online/available false.
+  if (currentRole === 'CUSTOMER') rider.role = 'RIDER';
+  if (!rider.riderProfile) rider.riderProfile = {};
+  rider.riderProfile.verificationStatus = 'PENDING';
+  rider.riderProfile.online = false;
+  rider.riderProfile.available = false;
+  await rider.save();
+
+  const verification = await VerificationRequest.create({
+    userId: rider._id,
+    type: 'RIDER',
+    status: 'PENDING',
+    documents,
+    note: JSON.stringify({ ...req.body, source: req.body?.source || 'RIDER_APP' }),
+  });
+
+  await Notification.create({
+    userId: rider._id,
+    role: 'RIDER',
+    title: 'Verification submitted',
+    message: 'Your documents were submitted successfully and are awaiting admin review.',
+    type: 'RIDER_VERIFICATION',
+    data: { verificationRequestId: verification._id, status: 'PENDING' },
+  });
+
+  ok(res, {
+    ...verification.toObject(),
+    status: 'PENDING',
+    requestStatus: 'PENDING',
+    pending: true,
+    verified: false,
+  }, 'Rider verification submitted', 201);
+}));
+
+
 router.use(['/delivery', '/rider'], requireAuth, allowRoles('RIDER', 'ADMIN'));
 
 function riderQuery(req) {
@@ -511,37 +659,6 @@ async function uploadDocument(file) {
   return { url: `data:${file.mimetype};base64,${file.buffer.toString('base64')}`, alt: file.originalname };
 }
 
-router.get(['/rider/verification/status', '/delivery/verification/status'], ah(async (req, res) => {
-  const rider = await getRider(req);
-  const request = await VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' }).sort({ createdAt: -1 });
-  ok(res, request || { status: rider.riderProfile?.verificationStatus || 'UNVERIFIED' });
-}));
-router.post(['/rider/verification/:riderId', '/rider/verification/request', '/delivery/verification/request'], upload.fields([{ name: 'aadhaarFront', maxCount: 1 }, { name: 'aadhaarBack', maxCount: 1 }, { name: 'drivingLicense', maxCount: 1 }, { name: 'vehicleRc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }]), ah(async (req, res) => {
-  const rider = await getRider(req);
-  if (req.params.riderId && String(req.params.riderId) !== String(rider.legacyId) && String(req.params.riderId) !== String(rider._id) && req.user.role !== 'ADMIN') throw new AppError('Cannot submit verification for another rider', 403);
-
-  const requiredFields = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc', 'profilePhoto'];
-  const missing = requiredFields.filter((field) => !(req.files?.[field]?.length));
-  if (missing.length) throw new AppError(`Missing required verification documents: ${missing.join(', ')}`, 400, 'VERIFICATION_DOCUMENTS_REQUIRED');
-
-  const current = await VerificationRequest.findOne({ userId: rider._id, type: 'RIDER', status: 'PENDING' }).sort({ createdAt: -1 });
-  if (current) throw new AppError('A rider verification request is already pending admin review', 409, 'VERIFICATION_ALREADY_PENDING');
-
-  const documents = [];
-  for (const [field, files] of Object.entries(req.files || {})) {
-    for (const file of files) {
-      const doc = await uploadDocument(file);
-      if (doc) documents.push({ ...doc, alt: field });
-    }
-  }
-  const verification = await VerificationRequest.create({ userId: rider._id, type: 'RIDER', status: 'PENDING', documents, note: JSON.stringify(req.body || {}) });
-  rider.riderProfile.verificationStatus = 'PENDING';
-  rider.riderProfile.online = false;
-  rider.riderProfile.available = false;
-  await rider.save();
-  await Notification.create({ userId: rider._id, role: 'RIDER', title: 'Verification submitted', message: 'Your documents were submitted successfully and are awaiting admin review.', type: 'RIDER_VERIFICATION', data: { verificationRequestId: verification._id, status: 'PENDING' } });
-  ok(res, verification, 'Rider verification submitted', 201);
-}));
 
 
 router.get('/rider/earnings/summary', ah(async (req, res) => {
