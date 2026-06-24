@@ -59,7 +59,7 @@ async function serializeRider(rider) {
   ]);
   const profile = rider.riderProfile || {};
   return {
-    profileId:rider.legacyId, driverId:rider.legacyId, mongoId:String(rider._id), userId:String(rider._id),
+    profileId:rider.legacyId || String(rider._id), driverId:rider.legacyId || String(rider._id), mongoId:String(rider._id), userId:String(rider._id),
     driverName:rider.name, driverEmail:rider.email, driverMobile:rider.phone,
     online:Boolean(profile.online), available:Boolean(profile.available), blocked:!rider.active,
     verified:VERIFIED.has(String(profile.verificationStatus||'').toUpperCase()),
