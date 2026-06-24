@@ -265,7 +265,23 @@ r.post(['/delivery/check-pincode','/serviceability/check-pincode','/addresses/ch
   ok(res,{...result,pincode});
 }));
 
-r.use(requireAuth, allowRoles('CUSTOMER', 'ADMIN'));
+// IMPORTANT: never apply a customer role guard globally on this compatibility
+// router. The router itself is mounted at /api, so an unscoped guard would also
+// intercept /delivery/* and /rider/* before the rider routers are reached.
+// Protect only the customer-owned namespaces. Notifications are intentionally
+// shared by every authenticated role and therefore require authentication only.
+r.use([
+  '/user',
+  '/cart',
+  '/checkout',
+  '/payments',
+  '/payment',
+  '/razorpay',
+  '/reviews',
+  '/delivery/validate',
+  '/orders/validate-delivery',
+], requireAuth, allowRoles('CUSTOMER', 'ADMIN'));
+r.use('/notifications', requireAuth);
 
 // Addresses with embedded numeric compatibility IDs.
 r.get('/user/addresses', ah(async (req, res) => ok(res, (await User.findById(req.user.id).lean())?.addresses || [])));

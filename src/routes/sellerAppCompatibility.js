@@ -14,7 +14,10 @@ const {
   VerificationRequest
 } = require('../models');
 
-r.use(requireAuth, allowRoles('SELLER', 'ADMIN'));
+// Scope the seller authorization middleware to seller namespaces only.
+// This router is mounted at /api; a global role guard here would reject every
+// rider request (for example /delivery/dashboard) before rider routes execute.
+r.use(['/seller', '/outlet-manager'], requireAuth, allowRoles('SELLER', 'ADMIN'));
 
 const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 function validGstin(value) { return GSTIN_RE.test(String(value || '').trim().toUpperCase()); }
