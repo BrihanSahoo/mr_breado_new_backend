@@ -158,21 +158,21 @@ router.post('/rider-verification/submit', upload.fields([
 }));
 
 
-// Unique runtime availability endpoint. It is mounted before all legacy rider
-// routers, so old role/status middleware cannot intercept a verified rider.
-router.post('/rider-runtime/availability', requireAuth, ah(async (req, res) => {
+// Runtime availability intentionally lives under the same unique
+// /rider-verification namespace that already handles successful document
+// submission and status checks. This avoids every legacy rider router and role
+// gate. Authorization is based on the verified request linked to the token's
+// user id, not on a possibly stale role value stored in an older account row.
+router.post('/rider-verification/runtime-availability', ah(async (req, res) => {
   const rider = await User.findById(req.user.id);
   if (!rider) throw new AppError('Rider account not found', 404, 'RIDER_NOT_FOUND');
-  if (String(rider.role || '').toUpperCase() === 'SELLER') {
-    throw new AppError('Seller accounts cannot use rider availability', 403, 'RIDER_ACTION_NOT_ALLOWED');
-  }
 
-  const { approved } = await synchronizeApprovedRider(rider);
+  const { approved, latest } = await synchronizeApprovedRider(rider);
   const requestedOnline = Boolean(req.body.online ?? req.body.isOnline ?? req.body.is_online);
   const requestedAvailable = Boolean(req.body.available ?? req.body.isAvailable ?? req.body.is_available ?? requestedOnline);
 
   if ((requestedOnline || requestedAvailable) && !approved) {
-    throw new AppError('Admin verification is required before going online', 409, 'RIDER_NOT_VERIFIED');
+    throw new AppError(`Admin verification is required before going online. Current status: ${String(latest?.status || rider.riderProfile?.verificationStatus || 'UNVERIFIED').toUpperCase()}`, 409, 'RIDER_NOT_VERIFIED');
   }
 
   const latitude = Number(req.body.latitude ?? req.body.lat);
