@@ -303,9 +303,33 @@ r.post(['/admin/orders/:id/cancel','/admin/mr-breado/orders/:id/cancel','/admin/
 r.get(['/admin/outlets/:id/performance','/admin/outlets/:id/calendar'], ah(async(req,res)=>{const orders=await Order.find({outletId:req.params.id}).lean();ok(res,{orders:orders.length,delivered:orders.filter(x=>x.status==='DELIVERED').length,cancelled:orders.filter(x=>x.status==='CANCELLED').length,revenue:orders.filter(x=>x.status==='DELIVERED').reduce((a,x)=>a+Number(x.total||0),0),items:orders})}));
 
 r.get(['/admin/payment-controls','/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
-  const [features,adminSettings,delivery,rider,razorpay]=await Promise.all([settings.getBusinessFeatures(),settings.adminSettings(),settings.get('delivery_settings'),settings.get('rider_settings'),settings.getRazorpayConfig(false)]);
+  const [features,adminSettings,pricing,razorpay]=await Promise.all([settings.getBusinessFeatures(),settings.adminSettings(),settings.getDeliveryPricing(),settings.getRazorpayConfig(false)]);
   const rp=adminSettings.secrets.find(x=>x.key==='razorpay_credentials')||{};const gm=adminSettings.secrets.find(x=>x.key==='google_maps_credentials')||{};
-  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayMode:String(razorpay?.keyId||'').startsWith('rzp_live_')?'LIVE':'TEST',razorpayKeyId:razorpay?.keyId||'',razorpaySecretConfigured:Boolean(razorpay?.keySecret),razorpayWebhookSecretConfigured:Boolean(razorpay?.webhookSecret),googleMapKey:gm.apiKey||'',googleMapsApiKey:gm.apiKey||'',googleMapsApiKeyConfigured:Boolean(gm.configured&&gm.apiKey),googleMapsAdminActionRequired:!Boolean(gm.configured&&gm.apiKey),googleMapsStatusMessage:Boolean(gm.configured&&gm.apiKey)?'Google Maps API key is configured':'Google Maps API key is required before delivery can be enabled',baseDeliveryCharge:delivery?.baseCharge||0,deliveryChargePerKm:delivery?.perKmCharge||0,minimumDeliveryCharge:delivery?.minimumCharge||0,maximumDeliveryCharge:delivery?.maximumCharge||9999,riderBasePay:rider?.basePay||0,riderPayPerKm:rider?.perKmRate||0,distanceProvider:'GOOGLE'});
+  ok(res,{codEnabled:features.feature_toggles.cod,onlinePaymentEnabled:features.feature_toggles.onlinePayment,mrBreadoTakeawayEnabled:features.feature_toggles.takeaway,takeawayEnabled:features.feature_toggles.takeaway,takeawayAdvancePercentage:features.takeaway.advanceValue,razorpayMode:String(razorpay?.keyId||'').startsWith('rzp_live_')?'LIVE':'TEST',razorpayKeyId:razorpay?.keyId||'',razorpaySecretConfigured:Boolean(razorpay?.keySecret),razorpayWebhookSecretConfigured:Boolean(razorpay?.webhookSecret),googleMapKey:'',googleMapsApiKey:'',googleMapsApiKeyConfigured:Boolean(gm.configured&&gm.apiKey),googleMapsAdminActionRequired:!Boolean(gm.configured&&gm.apiKey),googleMapsStatusMessage:Boolean(gm.configured&&gm.apiKey)?'Google Maps API key is configured':'Google Maps API key is required before delivery can be enabled',baseDeliveryCharge:pricing.customer.baseCharge,deliveryChargePerKm:pricing.customer.perKmCharge,minimumDeliveryCharge:pricing.customer.minimumCharge,maximumDeliveryCharge:pricing.customer.maximumCharge,riderBasePay:pricing.rider.basePay,riderPayPerKm:pricing.rider.perKmRate,minimumRiderDeliveryPay:pricing.rider.minimumDeliveryPay,assignmentRadiusKm:pricing.rider.assignmentRadiusKm,monthlySettlementDay:pricing.rider.monthlySettlementDay,distanceProvider:'GOOGLE'});
+}));
+
+r.get(['/admin/delivery-pricing','/admin/delivery-charges'], ah(async(req,res)=>{
+  const pricing=await settings.getDeliveryPricing();
+  ok(res,{...pricing,baseDeliveryCharge:pricing.customer.baseCharge,deliveryChargePerKm:pricing.customer.perKmCharge,minimumDeliveryCharge:pricing.customer.minimumCharge,maximumDeliveryCharge:pricing.customer.maximumCharge,riderBasePay:pricing.rider.basePay,riderPayPerKm:pricing.rider.perKmRate,minimumRiderDeliveryPay:pricing.rider.minimumDeliveryPay,assignmentRadiusKm:pricing.rider.assignmentRadiusKm,monthlySettlementDay:pricing.rider.monthlySettlementDay,formula:{customer:'max(minimum, min(maximum, base + distance × perKm))',rider:'max(minimum, base + distance × perKm)'}});
+}));
+
+r.put(['/admin/delivery-pricing','/admin/delivery-charges'], ah(async(req,res)=>{
+  const pricing=await settings.setDeliveryPricing({
+    customer:req.body.customer||{
+      baseCharge:req.body.baseDeliveryCharge,
+      perKmCharge:req.body.deliveryChargePerKm,
+      minimumCharge:req.body.minimumDeliveryCharge,
+      maximumCharge:req.body.maximumDeliveryCharge,
+    },
+    rider:req.body.rider||{
+      basePay:req.body.riderBasePay,
+      perKmRate:req.body.riderPayPerKm??req.body.riderDeliveryPayPerKm,
+      minimumDeliveryPay:req.body.minimumRiderDeliveryPay,
+      assignmentRadiusKm:req.body.assignmentRadiusKm,
+      monthlySettlementDay:req.body.monthlySettlementDay,
+    },
+  },req.user.id,{requestId:req.id});
+  ok(res,{...pricing,baseDeliveryCharge:pricing.customer.baseCharge,deliveryChargePerKm:pricing.customer.perKmCharge,minimumDeliveryCharge:pricing.customer.minimumCharge,maximumDeliveryCharge:pricing.customer.maximumCharge,riderBasePay:pricing.rider.basePay,riderPayPerKm:pricing.rider.perKmRate,minimumRiderDeliveryPay:pricing.rider.minimumDeliveryPay,assignmentRadiusKm:pricing.rider.assignmentRadiusKm,monthlySettlementDay:pricing.rider.monthlySettlementDay},'Delivery pricing saved');
 }));
 r.put('/admin/payment-controls', ah(async(req,res)=>{
   await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.onlinePaymentEnabled,takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,feature_toggles:{cod:req.body.codEnabled!==false}},req.user.id,{requestId:req.id});
@@ -322,13 +346,20 @@ r.put('/admin/payment-controls', ah(async(req,res)=>{
   ok(res,{...(await settings.getBusinessFeatures()),razorpayKeyId:keyId,razorpaySecretConfigured:Boolean(keySecret),razorpayWebhookSecretConfigured:Boolean(webhookSecret)},'Payment controls saved');
 }));
 r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
-  const apiKey=String(req.body.googleMapKey||req.body.googleMapsApiKey||'').trim();
+  const suppliedApiKey=String(req.body.googleMapKey||req.body.googleMapsApiKey||'').trim();
+  const apiKey=suppliedApiKey.includes('*')?'':suppliedApiKey;
   const current=await settings.getGoogleMapsConfig(false);
   if(!apiKey&&!current?.apiKey) throw new AppError('Google Maps API key is required',400,'GOOGLE_MAPS_KEY_REQUIRED');
   if(apiKey) await settings.setSecret('google_maps_credentials',{apiKey,enabled:req.body.googleMapsEnabled!==false,adminConfigured:true},req.user.id,{requestId:req.id});
-  await settings.set('delivery_settings',{baseCharge:Number(req.body.baseDeliveryCharge||0),perKmCharge:Number(req.body.deliveryChargePerKm||0),minimumCharge:Number(req.body.minimumDeliveryCharge||0),maximumCharge:Number(req.body.maximumDeliveryCharge||9999)},req.user.id,true,{requestId:req.id});
-  await settings.set('rider_settings',{basePay:Number(req.body.riderBasePay||0),perKmRate:Number(req.body.riderPayPerKm||0),monthlySettlementDay:Number(req.body.monthlySettlementDay||1)},req.user.id,false,{requestId:req.id});
-  ok(res,{saved:true,googleMapsApiKeyConfigured:true},'API and business settings saved');
+  const containsLegacyPricing=['baseDeliveryCharge','deliveryChargePerKm','minimumDeliveryCharge','maximumDeliveryCharge','riderBasePay','riderPayPerKm','minimumRiderDeliveryPay'].some((key)=>req.body[key]!==undefined);
+  if(containsLegacyPricing){
+    const currentPricing=await settings.getDeliveryPricing();
+    await settings.setDeliveryPricing({
+      customer:{...currentPricing.customer,baseCharge:req.body.baseDeliveryCharge??currentPricing.customer.baseCharge,perKmCharge:req.body.deliveryChargePerKm??currentPricing.customer.perKmCharge,minimumCharge:req.body.minimumDeliveryCharge??currentPricing.customer.minimumCharge,maximumCharge:req.body.maximumDeliveryCharge??currentPricing.customer.maximumCharge},
+      rider:{...currentPricing.rider,basePay:req.body.riderBasePay??currentPricing.rider.basePay,perKmRate:req.body.riderPayPerKm??currentPricing.rider.perKmRate,minimumDeliveryPay:req.body.minimumRiderDeliveryPay??currentPricing.rider.minimumDeliveryPay,monthlySettlementDay:req.body.monthlySettlementDay??currentPricing.rider.monthlySettlementDay},
+    },req.user.id,{requestId:req.id});
+  }
+  ok(res,{saved:true,googleMapsApiKeyConfigured:Boolean(apiKey||current?.apiKey)},'API settings saved');
 }));
 r.post('/admin/api-keys/validate-google', ah(async(req,res)=>ok(res,await settings.validateIntegration('google_maps_credentials'),'Google Maps API key is valid')));
 

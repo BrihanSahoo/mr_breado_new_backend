@@ -244,11 +244,21 @@ function coordsToPoint(outlet, address, kind) {
 }
 
 async function riderRate() {
-  const value = await settings.get('rider');
+  const value = (await settings.getDeliveryPricing()).rider;
   return {
-    perKm: Number(value?.perKmRate || value?.earningsPerKm || 0),
+    basePay: Number(value?.basePay || 0),
+    perKm: Number(value?.perKmRate || 0),
     minimum: Number(value?.minimumDeliveryPay || 0),
+    assignmentRadiusKm: Number(value?.assignmentRadiusKm || 8),
+    monthlySettlementDay: Number(value?.monthlySettlementDay || 1),
   };
+}
+
+function calculateRiderPay(distanceKm, rate) {
+  return Math.max(
+    Number(rate.minimum || 0),
+    Number((Number(rate.basePay || 0) + Number(distanceKm || 0) * Number(rate.perKm || 0)).toFixed(2)),
+  );
 }
 
 async function serializeOrder(order, { offer = false } = {}) {
@@ -258,7 +268,7 @@ async function serializeOrder(order, { offer = false } = {}) {
   const customer = hydrated.customerId;
   const rate = await riderRate();
   const distance = Number(hydrated.distanceKm || 0);
-  const riderPay = Math.max(rate.minimum, Number((distance * rate.perKm).toFixed(2)));
+  const riderPay = calculateRiderPay(distance, rate);
   const cod = hydrated.paymentMethod === 'COD';
   const appStatus = hydrated.status === 'RIDER_ASSIGNED'
     ? 'ASSIGNED'
@@ -304,6 +314,8 @@ async function serializeOrder(order, { offer = false } = {}) {
     deliveryFee: Number(hydrated.deliveryCharge || 0),
     rider_delivery_pay: riderPay,
     riderDeliveryPay: riderPay,
+    rider_base_pay: rate.basePay,
+    riderBasePay: rate.basePay,
     rider_delivery_pay_per_km: rate.perKm,
     riderDeliveryPayPerKm: rate.perKm,
     minimum_rider_delivery_pay: rate.minimum,
@@ -347,6 +359,7 @@ async function dashboard(req, rider) {
     RiderEarning.aggregate([{ $match: { riderId: rider._id } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     cashSummary(rider),
   ]);
+  const rate = await riderRate();
   const [verificationRequest, pendingPayoutAgg, paidPayoutAgg] = await Promise.all([
     VerificationRequest.findOne({ userId: rider._id, type: 'RIDER' }).sort({ createdAt: -1 }).lean(),
     RiderEarning.aggregate([{ $match: { riderId: rider._id, status: 'PENDING' } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
@@ -371,6 +384,16 @@ async function dashboard(req, rider) {
     pending_payout: Number(pendingPayoutAgg[0]?.total || 0),
     paidEarnings: Number(paidPayoutAgg[0]?.total || 0),
     paid_earnings: Number(paidPayoutAgg[0]?.total || 0),
+    riderBasePay: rate.basePay,
+    rider_base_pay: rate.basePay,
+    perKmRate: rate.perKm,
+    per_km_rate: rate.perKm,
+    minimumDeliveryPay: rate.minimum,
+    minimum_delivery_pay: rate.minimum,
+    assignmentRadiusKm: rate.assignmentRadiusKm,
+    assignment_radius_km: rate.assignmentRadiusKm,
+    monthlySettlementDay: rate.monthlySettlementDay,
+    monthly_settlement_day: rate.monthlySettlementDay,
     upiId: rider.riderProfile?.payoutAccount?.upiId || '',
     upi_id: rider.riderProfile?.payoutAccount?.upiId || '',
     currentOrder: await serializeOrder(current),
@@ -422,8 +445,7 @@ router.get(['/delivery/offers/active', '/rider/offers/active', '/delivery/orders
   const query = { status: { $in: ['READY', 'RIDER_ASSIGNMENT_PENDING'] }, riderId: null, fulfilmentType: 'DELIVERY' };
   if (cash.cashLimitBlocked) query.paymentMethod = { $ne: 'COD' };
   const orders = await Order.find(query).populate('outletId customerId').sort({ readyAt: 1 }).limit(100);
-  const riderConfig = await settings.get('rider');
-  const assignmentRadiusKm = Number(riderConfig?.assignmentRadiusKm ?? riderConfig?.deliveryOfferRadiusKm ?? 8);
+  const assignmentRadiusKm = (await riderRate()).assignmentRadiusKm;
   const latestLocation = await RiderLocation.findOne({ riderId: rider._id }).sort({ recordedAt: -1 });
   if (!latestLocation) throw new AppError('Update current location to receive nearby orders', 409, 'RIDER_LOCATION_REQUIRED');
   const [riderLng, riderLat] = latestLocation.location?.coordinates || [0, 0];
@@ -542,7 +564,7 @@ router.post(['/delivery/orders/:id/delivered', '/delivery/orders/:id/deliver', '
   const updated = await orderService.changeStatus(order, { id: rider._id, role: 'RIDER' }, 'DELIVERED', null, req.headers['idempotency-key'] || `rider:${rider._id}:delivered:${order._id}`);
   const rate = await riderRate();
   const distanceKm = Number(updated.distanceKm || 0);
-  const earningAmount = Math.max(rate.minimum, Number((distanceKm * rate.perKm).toFixed(2)));
+  const earningAmount = calculateRiderPay(distanceKm, rate);
   await RiderEarning.findOneAndUpdate(
     { orderId: updated._id },
     { $setOnInsert: { riderId: rider._id, outletId: updated.outletId, distanceKm, ratePerKm: rate.perKm, amount: earningAmount, status: 'PENDING' } },

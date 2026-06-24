@@ -176,7 +176,8 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
     const validation = await deliveryService.checkServiceability({ outletId, latitude: address.latitude, longitude: address.longitude, pincode: address.pincode || address.zipcode, address: address.line1 || address.address, city: address.city, state: address.state });
     if (!validation.serviceable) throw new AppError(validation.message || 'This outlet is outside your delivery range', 409, validation.code || 'OUT_OF_RANGE');
     distanceKm = Number(validation.distanceKm || 0);
-    deliveryFee = deliveryCharge(distanceKm, outlet.deliverySettings || await settings.get('delivery') || await settings.get('delivery_settings'));
+    const deliveryPricing = await settings.getDeliveryPricing();
+    deliveryFee = deliveryCharge(distanceKm, deliveryPricing.customer);
   }
 
   const coupon = features.feature_toggles.offers ? await findCoupon({ code: couponCode, subtotal, outletId, items: snapshots, customerId, paymentMethod: method, fulfilmentType: type }) : null;
@@ -259,10 +260,11 @@ async function changeStatus(order, user, nextStatus, reason, idempotencyKey, opt
         await inventory.consume(order.items, order.outletId, order._id, user.id, session, `order:${order._id}`);
         await CouponUsage.updateOne({ orderId: order._id }, { $set: { status: 'CONSUMED' } }, { session });
         if (order.riderId) {
-          const riderSettings = await settings.get('rider') || await settings.get('rider_settings') || {};
+          const riderSettings = (await settings.getDeliveryPricing()).rider;
           const rate = Number(riderSettings.perKmRate || 0);
-          const minimum = Number(riderSettings.minimumDeliveryEarning || riderSettings.minimumCharge || 0);
-          const amount = Math.max(minimum, Number((Number(order.distanceKm || 0) * rate).toFixed(2)));
+          const basePay = Number(riderSettings.basePay || 0);
+          const minimum = Number(riderSettings.minimumDeliveryPay || 0);
+          const amount = Math.max(minimum, Number((basePay + Number(order.distanceKm || 0) * rate).toFixed(2)));
           await RiderEarning.updateOne({ orderId: order._id }, { $setOnInsert: { riderId: order.riderId, orderId: order._id, outletId: order.outletId, distanceKm: order.distanceKm, ratePerKm: rate, amount, status: 'PENDING' } }, { upsert: true, session });
         }
       }

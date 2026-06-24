@@ -21,12 +21,20 @@ function pointDistanceKm(aLat, aLng, bLat, bLng) {
 }
 
 async function riderSettings() {
-  const value = await settings.get('rider');
+  const value = (await settings.getDeliveryPricing()).rider;
   return {
-    assignmentRadiusKm: Number(value?.assignmentRadiusKm ?? value?.deliveryOfferRadiusKm ?? 8),
-    perKmRate: Number(value?.perKmRate ?? value?.earningsPerKm ?? 0),
+    assignmentRadiusKm: Number(value?.assignmentRadiusKm ?? 8),
+    basePay: Number(value?.basePay ?? 0),
+    perKmRate: Number(value?.perKmRate ?? 0),
     minimumDeliveryPay: Number(value?.minimumDeliveryPay ?? 0),
   };
+}
+
+function calculateRiderPay(distanceKm, config) {
+  return Math.max(
+    Number(config.minimumDeliveryPay || 0),
+    Number((Number(config.basePay || 0) + Number(distanceKm || 0) * Number(config.perKmRate || 0)).toFixed(2)),
+  );
 }
 
 async function cashSummary(riderId) {
@@ -176,7 +184,7 @@ router.get(['/rider/orders/available-in-range','/delivery/orders/available-in-ra
   const latest=await RiderLocation.findOne({riderId:rider._id}).sort({recordedAt:-1}); if(!latest) throw new AppError('Update current location to receive nearby orders',409,'RIDER_LOCATION_REQUIRED');
   const cfg=await riderSettings(); const [lng,lat]=latest.location.coordinates;
   const rows=await Order.find({status:{$in:['READY','RIDER_ASSIGNMENT_PENDING']},riderId:null,fulfilmentType:'DELIVERY'}).populate('outletId customerId').sort({readyAt:1}).limit(100);
-  const items=rows.map(o=>{const [olng,olat]=o.outletId?.location?.coordinates||[0,0];const pickupDistanceKm=pointDistanceKm(lat,lng,olat,olng);const deliveryDistanceKm=Number(o.distanceKm||0);const earning=Math.max(cfg.minimumDeliveryPay,Number((deliveryDistanceKm*cfg.perKmRate).toFixed(2)));return {id:o.legacyId,mongoId:String(o._id),orderNumber:o.slug,pickupDistanceKm,deliveryDistanceKm,assignmentRadiusKm:cfg.assignmentRadiusKm,riderEarning:earning,ratePerKm:cfg.perKmRate,paymentMethod:o.paymentMethod,paymentStatus:o.paymentStatus,amountToCollect:o.paymentMethod==='COD'?Number(o.balanceDue>0?o.balanceDue:o.total||0):0,prepaid:o.paymentMethod!=='COD'||o.paymentStatus==='PAID',outlet:{name:o.outletId?.name,latitude:olat,longitude:olng},customer:{name:o.customerId?.name,phone:o.customerId?.phone},withinRange:pickupDistanceKm<=cfg.assignmentRadiusKm};}).filter(x=>x.withinRange);
+  const items=rows.map(o=>{const [olng,olat]=o.outletId?.location?.coordinates||[0,0];const pickupDistanceKm=pointDistanceKm(lat,lng,olat,olng);const deliveryDistanceKm=Number(o.distanceKm||0);const earning=calculateRiderPay(deliveryDistanceKm,cfg);return {id:o.legacyId,mongoId:String(o._id),orderNumber:o.slug,pickupDistanceKm,deliveryDistanceKm,assignmentRadiusKm:cfg.assignmentRadiusKm,riderEarning:earning,ratePerKm:cfg.perKmRate,paymentMethod:o.paymentMethod,paymentStatus:o.paymentStatus,amountToCollect:o.paymentMethod==='COD'?Number(o.balanceDue>0?o.balanceDue:o.total||0):0,prepaid:o.paymentMethod!=='COD'||o.paymentStatus==='PAID',outlet:{name:o.outletId?.name,latitude:olat,longitude:olng},customer:{name:o.customerId?.name,phone:o.customerId?.phone},withinRange:pickupDistanceKm<=cfg.assignmentRadiusKm};}).filter(x=>x.withinRange);
   ok(res,items);
 }));
 

@@ -122,7 +122,8 @@ async function checkServiceability({ latitude, longitude, pincode, address, city
   if (!best || !best.serviceable) {
     return { ...coords, pincode:requestedPincode, serviceable:false, deliverable:false, canDeliver:false, code:'NO_OUTLET_IN_RANGE', nearestOutletId:best?String(best.outlet._id):null, nearestOutletName:best?.outlet?.name||null, distanceKm:best?.distanceKm||0, deliveryRadiusKm:best?.radius||0, allowedRadiusKm:best?.radius||0, deliveryCharge:0, message:'No outlet is available within the delivery range of your current location.' };
   }
-  const charge = deliveryCharge(best.distanceKm, best.outlet.deliverySettings || {});
+  const pricing = await settings.getDeliveryPricing();
+  const charge = deliveryCharge(best.distanceKm, pricing.customer);
   return { ...coords, pincode:requestedPincode || coords.pincode, serviceable:true, deliverable:true, canDeliver:true, code:'OUTLET_AVAILABLE', nearestOutletId:String(best.outlet._id), nearestOutletName:best.outlet.name, distanceKm:best.distanceKm, estimatedTravelMinutes:best.durationMinutes, deliveryRadiusKm:best.radius, allowedRadiusKm:best.radius, deliveryCharge:charge, message:`Delivery is available from ${best.outlet.name}.` };
 }
 

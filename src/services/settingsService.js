@@ -7,10 +7,76 @@ const { AppError } = require('../utils/errors');
 const defaults = {
   feature_toggles: { onlinePayment:true, cod:true, takeaway:true, delivery:true, riderAssignment:true, offers:true },
   delivery: { baseCharge:20, perKmCharge:8, minimumCharge:20, maximumCharge:150 },
-  rider: { perKmRate:7 },
+  rider: { basePay:0, perKmRate:7, minimumDeliveryPay:20, assignmentRadiusKm:8, monthlySettlementDay:1 },
+  delivery_pricing: {
+    customer: { baseCharge:20, perKmCharge:8, minimumCharge:20, maximumCharge:150 },
+    rider: { basePay:0, perKmRate:7, minimumDeliveryPay:20, assignmentRadiusKm:8, monthlySettlementDay:1 },
+  },
   takeaway: { advanceType:'PERCENT', advanceValue:20 },
   tax: { rate:5 },
 };
+
+const finiteMoney = (value, fallback, field) => {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    if (fallback !== undefined) return Number(fallback);
+    throw new AppError(`${field} must be a non-negative number`, 400, 'INVALID_DELIVERY_PRICING');
+  }
+  return Number(number.toFixed(2));
+};
+
+function normalizeDeliveryPricing(value={}) {
+  const customerInput = value.customer || value.delivery || value.customerPricing || value;
+  const riderInput = value.rider || value.riderPricing || value;
+  const customer = {
+    baseCharge: finiteMoney(customerInput.baseCharge ?? customerInput.baseDeliveryCharge, defaults.delivery.baseCharge, 'Customer base charge'),
+    perKmCharge: finiteMoney(customerInput.perKmCharge ?? customerInput.deliveryChargePerKm ?? customerInput.customerChargePerKm, defaults.delivery.perKmCharge, 'Customer per-km charge'),
+    minimumCharge: finiteMoney(customerInput.minimumCharge ?? customerInput.minimumDeliveryCharge, defaults.delivery.minimumCharge, 'Minimum customer delivery charge'),
+    maximumCharge: finiteMoney(customerInput.maximumCharge ?? customerInput.maximumDeliveryCharge, defaults.delivery.maximumCharge, 'Maximum customer delivery charge'),
+  };
+  if (customer.maximumCharge < customer.minimumCharge) {
+    throw new AppError('Maximum customer delivery charge cannot be below the minimum charge', 400, 'INVALID_DELIVERY_PRICING');
+  }
+  const rider = {
+    basePay: finiteMoney(riderInput.basePay ?? riderInput.riderBasePay, defaults.rider.basePay, 'Rider base pay'),
+    perKmRate: finiteMoney(riderInput.perKmRate ?? riderInput.riderPayPerKm ?? riderInput.riderDeliveryPayPerKm ?? riderInput.earningsPerKm, defaults.rider.perKmRate, 'Rider per-km pay'),
+    minimumDeliveryPay: finiteMoney(riderInput.minimumDeliveryPay ?? riderInput.minimumRiderDeliveryPay ?? riderInput.minimumDeliveryEarning ?? riderInput.minimumCharge, defaults.rider.minimumDeliveryPay, 'Minimum rider delivery pay'),
+    assignmentRadiusKm: finiteMoney(riderInput.assignmentRadiusKm ?? riderInput.deliveryOfferRadiusKm, defaults.rider.assignmentRadiusKm, 'Rider assignment radius'),
+    monthlySettlementDay: Math.min(28, Math.max(1, Math.trunc(Number(riderInput.monthlySettlementDay ?? defaults.rider.monthlySettlementDay) || defaults.rider.monthlySettlementDay))),
+  };
+  return { customer, rider };
+}
+
+async function storedValue(key) {
+  const row = await Setting.findOne({ key, active:true, isSecret:{$ne:true} }).lean();
+  return row?.value ?? null;
+}
+
+async function getDeliveryPricing() {
+  const [canonical, delivery, deliveryCompat, rider, riderCompat] = await Promise.all([
+    storedValue('delivery_pricing'),
+    storedValue('delivery'),
+    storedValue('delivery_settings'),
+    storedValue('rider'),
+    storedValue('rider_settings'),
+  ]);
+  return normalizeDeliveryPricing({
+    customer: { ...defaults.delivery, ...(delivery || {}), ...(deliveryCompat || {}), ...(canonical?.customer || canonical?.delivery || {}) },
+    rider: { ...defaults.rider, ...(rider || {}), ...(riderCompat || {}), ...(canonical?.rider || {}) },
+  });
+}
+
+async function setDeliveryPricing(value, userId, options={}) {
+  const pricing = normalizeDeliveryPricing(value);
+  await Promise.all([
+    set('delivery_pricing', pricing, userId, true, options),
+    set('delivery', pricing.customer, userId, true, options),
+    set('delivery_settings', pricing.customer, userId, true, options),
+    set('rider', pricing.rider, userId, false, options),
+    set('rider_settings', pricing.rider, userId, false, options),
+  ]);
+  return pricing;
+}
 
 function normalizeFeatureToggles(value={}) {
   const current = { ...defaults.feature_toggles, ...(value || {}) };
@@ -97,10 +163,24 @@ async function publicSettings() {
   const rows = await Setting.find({ public:true, active:true, isSecret:{$ne:true} }).lean();
   const data = { ...defaults };
   for (const row of rows) data[row.key] = row.value;
-  const razorpay = await getRazorpayConfig(false);
-  const maps = await getGoogleMapsConfig(false);
+  const [razorpay, maps, deliveryPricing] = await Promise.all([
+    getRazorpayConfig(false),
+    getGoogleMapsConfig(false),
+    getDeliveryPricing(),
+  ]);
   data.feature_toggles = normalizeFeatureToggles(data.feature_toggles);
   data.takeaway = normalizeTakeaway(data.takeaway);
+  data.deliveryPricing = deliveryPricing;
+  data.delivery_pricing = deliveryPricing;
+  data.delivery = deliveryPricing.customer;
+  data.rider = deliveryPricing.rider;
+  data.baseDeliveryCharge = deliveryPricing.customer.baseCharge;
+  data.deliveryChargePerKm = deliveryPricing.customer.perKmCharge;
+  data.minimumDeliveryCharge = deliveryPricing.customer.minimumCharge;
+  data.maximumDeliveryCharge = deliveryPricing.customer.maximumCharge;
+  data.riderBasePay = deliveryPricing.rider.basePay;
+  data.riderPayPerKm = deliveryPricing.rider.perKmRate;
+  data.minimumRiderDeliveryPay = deliveryPricing.rider.minimumDeliveryPay;
   const onlineEnabled = data.feature_toggles.onlinePayment && razorpay.enabled !== false;
   data.payment = { ...(data.payment||{}), onlinePaymentEnabled:onlineEnabled, onlinePaymentConfigured:Boolean(razorpay.keyId && razorpay.keySecret), razorpayKeyId:onlineEnabled ? razorpay.keyId : '' };
   data.razorpayKeyId = onlineEnabled ? razorpay.keyId : '';
@@ -170,4 +250,4 @@ async function validateIntegration(key) {
   await Setting.updateOne({key},{$set:{lastValidatedAt:new Date()}});
   return {key,valid:true,validatedAt:new Date()};
 }
-module.exports={get,set,setSecret,publicSettings,adminSettings,getRazorpayConfig,getGoogleMapsConfig,validateIntegration,getBusinessFeatures,setBusinessFeatures,normalizeFeatureToggles,normalizeTakeaway,defaults,mask};
+module.exports={get,set,setSecret,publicSettings,adminSettings,getRazorpayConfig,getGoogleMapsConfig,validateIntegration,getBusinessFeatures,setBusinessFeatures,getDeliveryPricing,setDeliveryPricing,normalizeDeliveryPricing,normalizeFeatureToggles,normalizeTakeaway,defaults,mask};
