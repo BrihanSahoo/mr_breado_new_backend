@@ -88,6 +88,44 @@ async function serializeRider(rider) {
   };
 }
 
+router.get('/admin/riders/finance-summary', requireAuth, allowRoles('ADMIN'), ah(async (req, res) => {
+  const [cashRows, earningRows, payoutRows, riderCounts, pendingCash] = await Promise.all([
+    RiderCashTransaction.aggregate([
+      { $match: { status: 'CONFIRMED' } },
+      { $group: { _id: '$type', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    RiderEarning.aggregate([{ $group: { _id: '$status', amount: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    RiderPayout.aggregate([{ $group: { _id: '$status', amount: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    User.aggregate([
+      { $match: { role: 'RIDER' } },
+      { $group: { _id: null, total: { $sum: 1 }, active: { $sum: { $cond: ['$active', 1, 0] } }, online: { $sum: { $cond: [{ $and: ['$riderProfile.online', '$riderProfile.available'] }, 1, 0] } } } },
+    ]),
+    RiderSettlement.aggregate([
+      { $match: { status: 'PENDING' } },
+      { $group: { _id: null, amount: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+  ]);
+  const value = (rows, key) => Number(rows.find((row) => row._id === key)?.amount || 0);
+  const count = (rows, key) => Number(rows.find((row) => row._id === key)?.count || 0);
+  const collected = value(cashRows, 'COLLECTED');
+  const received = value(cashRows, 'DEPOSIT') + value(cashRows, 'ADMIN_CASH_CONFIRMED');
+  const held = Math.max(0, Number((collected - received).toFixed(2)));
+  ok(res, {
+    riders: riderCounts[0] || { total: 0, active: 0, online: 0 },
+    totalCodCollected: collected,
+    totalReceivedFromRiders: received,
+    totalCodHeldByRiders: held,
+    pendingCashSettlementAmount: Number(pendingCash[0]?.amount || 0),
+    pendingCashSettlementCount: Number(pendingCash[0]?.count || 0),
+    totalPaidToRiders: value(payoutRows, 'PAID'),
+    totalPendingRiderPayout: value(earningRows, 'PENDING'),
+    pendingPayoutConfirmationAmount: value(payoutRows, 'PENDING'),
+    paidPayoutCount: count(payoutRows, 'PAID'),
+    pendingPayoutCount: count(payoutRows, 'PENDING'),
+    totalRiderEarnings: value(earningRows, 'PENDING') + value(earningRows, 'PAID'),
+  });
+}));
+
 router.get(['/admin/delivery-boys','/admin/riders','/admin/drivers'], requireAuth, allowRoles('ADMIN'), ah(async(req,res)=>{
   const page=Math.max(1,Number(req.query.page||1)); const limit=Math.min(100,Math.max(1,Number(req.query.perPage||req.query.per_page||20)));
   const search=String(req.query.search||'').trim();

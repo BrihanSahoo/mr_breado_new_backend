@@ -180,15 +180,17 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
     deliveryFee = deliveryCharge(distanceKm, deliveryPricing.customer);
   }
 
+  const originalDeliveryFee = deliveryFee;
   const coupon = features.feature_toggles.offers ? await findCoupon({ code: couponCode, subtotal, outletId, items: snapshots, customerId, paymentMethod: method, fulfilmentType: type }) : null;
   const freeDelivery = coupon && ['FREE_DELIVERY', 'FREEDELIVERY', 'DELIVERY'].includes(String(coupon.type || '').toUpperCase());
   if (freeDelivery) deliveryFee = 0;
   const discount = couponDiscount(coupon, subtotal);
+  const couponSavings = Number((discount + (freeDelivery ? originalDeliveryFee : 0)).toFixed(2));
   const total = Number(Math.max(0, subtotal - discount + tax + deliveryFee).toFixed(2));
   const takeawayAdvancePercentage = type === 'TAKEAWAY' ? Number(features.takeaway.advanceValue || 0) : 0;
   const payableOnlineAmount = type === 'TAKEAWAY' ? Number((total * takeawayAdvancePercentage / 100).toFixed(2)) : total;
   const balanceDue = type === 'TAKEAWAY' ? Number((total - payableOnlineAmount).toFixed(2)) : 0;
-  return { outlet, snapshots, subtotal: Number(subtotal.toFixed(2)), discount, tax, deliveryCharge: deliveryFee, total, distanceKm, fulfilmentType: type, takeawayAdvancePercentage, payableOnlineAmount, balanceDue, featureToggles: features.feature_toggles, couponCode: coupon?.code || null, coupon };
+  return { outlet, snapshots, subtotal: Number(subtotal.toFixed(2)), discount, tax, deliveryCharge: deliveryFee, total, distanceKm, fulfilmentType: type, takeawayAdvancePercentage, payableOnlineAmount, balanceDue, featureToggles: features.feature_toggles, couponCode: coupon?.code || null, coupon, couponSavings, freeDelivery };
 }
 
 async function createOrder({ customerId, outletId, items, address, fulfilmentType, paymentMethod, clientRequestId, couponCode }) {
@@ -225,7 +227,7 @@ async function createOrder({ customerId, outletId, items, address, fulfilmentTyp
       }], { session });
       await inventory.reserve(pricing.snapshots, outletId, order._id, customerId, session, `order:${order._id}`);
       if (pricing.coupon?._id && pricing.couponCode) {
-        await CouponUsage.create([{ couponId: pricing.coupon._id, code: pricing.couponCode, customerId, orderId: order._id, outletId, discountAmount: pricing.discount, status: 'RESERVED' }], { session });
+        await CouponUsage.create([{ couponId: pricing.coupon._id, code: pricing.couponCode, customerId, orderId: order._id, outletId, discountAmount: pricing.couponSavings ?? pricing.discount, status: 'RESERVED' }], { session });
         if (pricing.coupon.constructor?.modelName === 'Coupon' || await Coupon.exists({ _id: pricing.coupon._id }).session(session)) {
           await Coupon.updateOne({ _id: pricing.coupon._id }, { $inc: { usedCount: 1 } }, { session });
         }

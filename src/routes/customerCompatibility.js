@@ -15,6 +15,7 @@ const { AppError } = require('../utils/errors');
 const { serializeVariantFields } = require('../utils/productVariants');
 const { findOneCompat, resolveObjectId, findEmbeddedByCompatId } = require('../utils/compatId');
 const deliveryService = require('../services/deliveryService');
+const trackingRouteService = require('../services/trackingRouteService');
 
 const activeOutlet = { active: true, open: true };
 const numberOrNull = (v) => Number.isFinite(Number(v)) ? Number(v) : null;
@@ -474,11 +475,108 @@ r.get(['/user/orders/:id/invoice', '/user/orders/:id/invoice.pdf', '/user/orders
 }));
 r.get(['/user/orders/:id/tracking', '/user/orders/:id/live-location'], ah(async (req, res) => {
   const order = await findOneCompat(Order, req.params.id, { customerId: req.user.id });
-  if (!order) throw new AppError('Order not found', 404);
-  await order.populate('outletId riderId');
+  if (!order) throw new AppError('Order not found', 404, 'ORDER_NOT_FOUND');
+  await order.populate('outletId riderId customerId');
   const latest = await RiderLocation.findOne({ orderId: order._id }).sort({ recordedAt: -1 }).lean();
-  const location = latest ? { latitude: latest.location?.coordinates?.[1], longitude: latest.location?.coordinates?.[0], heading: latest.heading, speed: latest.speed, updatedAt: latest.recordedAt } : null;
-  ok(res, { order, orderStatus: order.status, rider: order.riderId, driver: order.riderId, location, riderLocation: location });
+  const outlet = order.outletId || null;
+  const rider = order.riderId || null;
+  const riderLocation = latest ? {
+    latitude: latest.location?.coordinates?.[1],
+    longitude: latest.location?.coordinates?.[0],
+    heading: latest.heading,
+    speed: latest.speed,
+    accuracy: latest.accuracy,
+    updatedAt: latest.recordedAt || latest.updatedAt,
+  } : null;
+  const customer = {
+    name: order.customerId?.name || order.address?.label || 'Delivery customer',
+    phone: order.customerId?.phone || '',
+    address: [order.address?.line1, order.address?.line2, order.address?.area, order.address?.landmark, order.address?.city, order.address?.state, order.address?.pincode].filter(Boolean).join(', '),
+    latitude: numberOrNull(order.address?.latitude),
+    longitude: numberOrNull(order.address?.longitude),
+  };
+  const restaurant = outlet ? {
+    id: outlet.legacyId ?? String(outlet._id),
+    outletId: outlet.legacyId ?? String(outlet._id),
+    name: outlet.name,
+    address: [outlet.address?.line1, outlet.address?.line2, outlet.address?.area, outlet.address?.landmark, outlet.address?.city, outlet.address?.state, outlet.address?.pincode].filter(Boolean).join(', '),
+    latitude: numberOrNull(outlet.location?.coordinates?.[1]),
+    longitude: numberOrNull(outlet.location?.coordinates?.[0]),
+    logo: imageUrl(outlet.logo),
+    banner: imageUrl(outlet.coverImage),
+  } : null;
+  let distanceToCustomerKm = null;
+  let etaMinutes = null;
+  const prePickupStatuses = new Set(['PENDING', 'PLACED', 'CONFIRMED', 'ACCEPTED', 'PREPARING', 'READY', 'RIDER_ASSIGNED', 'ASSIGNED']);
+  const beforePickup = prePickupStatuses.has(String(order.status || '').toUpperCase());
+  const navigationDestination = beforePickup && restaurant?.latitude != null && restaurant?.longitude != null
+    ? { latitude: restaurant.latitude, longitude: restaurant.longitude, label: 'Outlet pickup' }
+    : customer.latitude != null && customer.longitude != null
+      ? { latitude: customer.latitude, longitude: customer.longitude, label: 'Customer delivery' }
+      : null;
+  let route = null;
+  if (riderLocation?.latitude != null && riderLocation?.longitude != null && navigationDestination) {
+    route = await trackingRouteService.getDrivingRoute(
+      { latitude: riderLocation.latitude, longitude: riderLocation.longitude },
+      navigationDestination,
+    );
+    if (route?.distanceKm > 0) {
+      distanceToCustomerKm = Number(route.distanceKm.toFixed(2));
+      etaMinutes = route.etaMinutes;
+    } else {
+      distanceToCustomerKm = Number(haversineKm(riderLocation.latitude, riderLocation.longitude, navigationDestination.latitude, navigationDestination.longitude).toFixed(2));
+      const speedKmh = Math.max(12, Number(riderLocation.speed || 0) * 3.6 || 20);
+      etaMinutes = Math.max(1, Math.ceil(distanceToCustomerKm / speedKmh * 60));
+    }
+  }
+  const riderPayload = rider ? {
+    id: rider.legacyId ?? String(rider._id),
+    riderId: rider.legacyId ?? String(rider._id),
+    name: rider.name || 'Delivery Partner',
+    phone: rider.phone || '',
+    mobile: rider.phone || '',
+    profileImage: imageUrl(rider.riderProfile?.passportPhoto || rider.avatar),
+    vehicleNumber: rider.riderProfile?.vehicle?.vehicleNumber || '',
+  } : null;
+  ok(res, {
+    order: {
+      id: order.legacyId ?? String(order._id),
+      mongoId: String(order._id),
+      orderId: order.legacyId ?? String(order._id),
+      orderNumber: order.slug,
+      slug: order.slug,
+      status: order.status,
+      fulfilmentType: order.fulfilmentType,
+      updatedAt: order.updatedAt,
+    },
+    orderId: order.legacyId ?? String(order._id),
+    orderNumber: order.slug,
+    orderStatus: order.status,
+    status: order.status,
+    rider: riderPayload,
+    driver: riderPayload,
+    restaurant,
+    outlet: restaurant,
+    store: restaurant,
+    customer,
+    drop: customer,
+    deliveryAddress: customer,
+    location: riderLocation,
+    riderLocation,
+    isLive: Boolean(riderLocation),
+    live: Boolean(riderLocation),
+    distanceToCustomerKm,
+    distance_to_customer_km: distanceToCustomerKm,
+    estimatedArrivalMinutes: etaMinutes,
+    estimated_arrival_minutes: etaMinutes,
+    beforePickup,
+    navigationDestination,
+    route,
+    encodedPolyline: route?.encodedPolyline || '',
+    distanceText: route?.distanceText || (distanceToCustomerKm != null ? `${distanceToCustomerKm.toFixed(1)} km` : ''),
+    durationText: route?.durationText || (etaMinutes != null ? `${etaMinutes} min` : ''),
+    updatedAt: riderLocation?.updatedAt || order.updatedAt,
+  });
 }));
 
 r.get('/reviews/order/:id/eligibility', ah(async (req, res) => {
