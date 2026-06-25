@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const mongoose = require('mongoose');
-const { Order, Payment, PaymentWebhookEvent, Refund } = require('../models');
+const { Order, Payment, PaymentWebhookEvent, Refund, RiderSettlement } = require('../models');
+const riderFinance = require('./riderFinanceService');
 const settings = require('./settingsService');
 const { AppError } = require('../utils/errors');
 
@@ -191,15 +192,20 @@ async function webhook(raw, signature, eventIdHeader) {
 
   try {
     let payment = null;
+    let riderSettlement = null;
     if (paymentEntity?.id || paymentEntity?.order_id) {
       payment = await Payment.findOne({ $or: [{ gatewayPaymentId: paymentEntity.id }, { gatewayOrderId: paymentEntity.order_id }] });
+      if (!payment) riderSettlement = await RiderSettlement.findOne({ $or: [{ gatewayPaymentId: paymentEntity.id }, { gatewayOrderId: paymentEntity.order_id }] });
     }
 
     if (event.event === 'payment.captured' || event.event === 'order.paid' || event.event === 'payment.authorized') {
       if (payment && paymentEntity) await applySuccessfulPayment(payment, paymentEntity.id, null, paymentEntity);
+      else if (riderSettlement && paymentEntity) await riderFinance.applySuccessfulSettlement(riderSettlement, { gatewayPaymentId: paymentEntity.id, rawMetadata: paymentEntity });
     } else if (event.event === 'payment.failed') {
       if (payment) {
         await Payment.updateOne({ _id: payment._id }, { $set: { status: 'FAILED', failureReason: paymentEntity?.error_description || paymentEntity?.error_reason || 'Payment failed', gatewayPaymentId: paymentEntity?.id, rawMetadata: paymentEntity } });
+      } else if (riderSettlement) {
+        await RiderSettlement.updateOne({ _id: riderSettlement._id }, { $set: { status: 'FAILED', failureReason: paymentEntity?.error_description || paymentEntity?.error_reason || 'Payment failed', gatewayPaymentId: paymentEntity?.id, rawMetadata: paymentEntity } });
       }
     } else if (event.event?.startsWith('refund.')) {
       const refundStatus = event.event === 'refund.processed' ? 'PROCESSED' : event.event === 'refund.failed' ? 'FAILED' : 'PENDING';

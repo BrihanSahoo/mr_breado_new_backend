@@ -5,9 +5,10 @@ const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const { findOneCompat } = require('../utils/compatId');
 const settings = require('../services/settingsService');
+const riderFinance = require('../services/riderFinanceService');
 const {
   User, Order, RiderLocation, RiderEarning, RiderCashTransaction,
-  RiderPayout, VerificationRequest, Notification,
+  RiderPayout, RiderSettlement, VerificationRequest, Notification,
 } = require('../models');
 
 const router = express.Router();
@@ -58,12 +59,14 @@ async function earningSummary(riderId) {
 }
 
 async function serializeRider(rider) {
-  const [cash, earnings, delivered, latestLocation, verification, payouts] = await Promise.all([
-    cashSummary(rider._id), earningSummary(rider._id),
+  const [cash, earnings, delivered, latestLocation, verification, payouts, settlements, financeHistory] = await Promise.all([
+    riderFinance.cashSummary(rider._id), riderFinance.earningSummary(rider._id),
     Order.countDocuments({ riderId:rider._id, status:'DELIVERED' }),
     RiderLocation.findOne({ riderId:rider._id }).sort({ recordedAt:-1 }),
     VerificationRequest.findOne({ userId:rider._id, type:'RIDER' }).sort({ createdAt:-1 }),
     RiderPayout.find({ riderId:rider._id }).sort({ createdAt:-1 }).limit(20),
+    RiderSettlement.find({ riderId:rider._id }).sort({ createdAt:-1 }).limit(30),
+    riderFinance.financeHistory(rider._id, 100),
   ]);
   const profile = rider.riderProfile || {};
   return {
@@ -73,12 +76,15 @@ async function serializeRider(rider) {
     verified:VERIFIED.has(String(profile.verificationStatus||'').toUpperCase()),
     verificationStatus:profile.verificationStatus || 'UNVERIFIED', verificationRequestId:verification?._id,
     verificationRequest:verification ? { id:String(verification._id), status:verification.status, documents:(verification.documents||[]).map(d=>({url:d.url,publicId:d.publicId,alt:d.alt,downloadUrl:d.url})), note:verification.note, createdAt:verification.createdAt, reviewedAt:verification.reviewedAt } : null,
-    totalDeliveries:delivered, totalEarnings:earnings.total, pendingPayout:earnings.pending, paidEarnings:earnings.paid,
-    cashInHand:cash.outstanding, totalCashCollected:cash.collected, totalCashDeposited:cash.deposited,
+    totalDeliveries:delivered, totalEarnings:earnings.total, pendingPayout:earnings.pending, paidEarnings:earnings.paid, payoutAwaitingConfirmation:earnings.payoutPending,
+    cashInHand:cash.outstanding, totalCashCollected:cash.collected, totalCashDeposited:cash.deposited, pendingCashSettlement:cash.pendingSettlement, pendingCashSettlementCount:cash.pendingSettlementCount, availableCashToSettle:cash.availableToSettle,
     cashLimit:Number(profile.cashLimit||0), rating:Number(profile.rating||0),
     upiId:profile.payoutAccount?.upiId || '', payoutAccount:profile.payoutAccount || {},
+    passportPhoto:profile.passportPhoto || rider.avatar || null, profileImage:profile.passportPhoto?.url || rider.avatar?.url || '',
     latestLocation: latestLocation ? { latitude:latestLocation.location?.coordinates?.[1], longitude:latestLocation.location?.coordinates?.[0], recordedAt:latestLocation.recordedAt } : null,
-    payouts:payouts.map(p => ({ id:String(p._id), amount:p.amount,status:p.status,periodStart:p.periodStart,periodEnd:p.periodEnd,upiId:p.upiId,paymentReference:p.paymentReference,paidAt:p.paidAt,note:p.note })),
+    payouts:payouts.map(p => ({ id:String(p._id), amount:p.amount,status:p.status,periodStart:p.periodStart,periodEnd:p.periodEnd,upiId:p.upiId,paymentReference:p.paymentReference,paidAt:p.paidAt,createdAt:p.createdAt,note:p.note })),
+    settlements:settlements.map(riderFinance.serializeSettlement),
+    financeHistory,
   };
 }
 

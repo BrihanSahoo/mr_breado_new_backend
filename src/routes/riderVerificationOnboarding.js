@@ -11,7 +11,7 @@ const { normalizeRole } = require('../utils/roles');
 const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 5 },
+  limits: { fileSize: 8 * 1024 * 1024, files: 6 },
   fileFilter: (_req, file, cb) => {
     if (!/^image\//i.test(file.mimetype) && file.mimetype !== 'application/pdf') {
       return cb(new AppError('Only image or PDF verification documents are allowed', 400, 'INVALID_FILE_TYPE'));
@@ -91,11 +91,13 @@ router.get('/rider-verification/status', ah(async (req, res) => {
     pending: status === 'PENDING',
     rejected: status === 'REJECTED',
     documents: [],
+    passportPhoto: rider.riderProfile?.passportPhoto || rider.avatar || null,
   });
 }));
 
 router.post('/rider-verification/submit', upload.fields([
   { name: 'profilePhoto', maxCount: 1 },
+  { name: 'passportPhoto', maxCount: 1 },
   { name: 'aadhaarFront', maxCount: 1 },
   { name: 'aadhaarBack', maxCount: 1 },
   { name: 'drivingLicense', maxCount: 1 },
@@ -105,8 +107,9 @@ router.post('/rider-verification/submit', upload.fields([
   if (!rider) throw new AppError('Account not found', 404, 'ACCOUNT_NOT_FOUND');
   const currentRole = assertApplicant(rider);
 
-  const required = ['profilePhoto', 'aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc'];
+  const required = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc'];
   const missing = required.filter((field) => !(req.files?.[field]?.length));
+  if (!(req.files?.passportPhoto?.length || req.files?.profilePhoto?.length)) missing.unshift('passportPhoto');
   if (missing.length) {
     throw new AppError(`Missing required verification documents: ${missing.join(', ')}`, 400, 'VERIFICATION_DOCUMENTS_REQUIRED');
   }
@@ -122,6 +125,13 @@ router.post('/rider-verification/submit', upload.fields([
       const uploaded = await uploadDocument(file);
       documents.push({ ...uploaded, alt: field });
     }
+  }
+
+  const passportDocument = documents.find((doc) => doc.alt === 'passportPhoto') || documents.find((doc) => doc.alt === 'profilePhoto');
+  if (passportDocument) {
+    rider.avatar = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
+    if (!rider.riderProfile) rider.riderProfile = {};
+    rider.riderProfile.passportPhoto = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
   }
 
   if (currentRole !== 'RIDER') rider.role = 'RIDER';

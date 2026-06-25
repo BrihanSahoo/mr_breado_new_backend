@@ -9,6 +9,7 @@ const { AppError } = require('../utils/errors');
 const { findOneCompat } = require('../utils/compatId');
 const settings = require('../services/settingsService');
 const orderService = require('../services/orderService');
+const riderFinance = require('../services/riderFinanceService');
 const {
   User,
   Outlet,
@@ -23,7 +24,7 @@ const {
 const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 5 },
+  limits: { fileSize: 8 * 1024 * 1024, files: 6 },
   fileFilter: (_req, file, cb) => {
     if (!/^image\//i.test(file.mimetype) && file.mimetype !== 'application/pdf') {
       return cb(new AppError('Only image or PDF verification documents are allowed', 400, 'INVALID_FILE_TYPE'));
@@ -83,6 +84,7 @@ router.get([
     pending: status === 'PENDING',
     rejected: status === 'REJECTED',
     documents: [],
+    passportPhoto: rider.riderProfile?.passportPhoto || rider.avatar || null,
   });
 }));
 
@@ -97,6 +99,7 @@ router.post([
   { name: 'drivingLicense', maxCount: 1 },
   { name: 'vehicleRc', maxCount: 1 },
   { name: 'profilePhoto', maxCount: 1 },
+  { name: 'passportPhoto', maxCount: 1 },
 ]), ah(async (req, res) => {
   let rider = await User.findById(req.user.id);
   if (!rider) throw new AppError('Account not found', 404, 'ACCOUNT_NOT_FOUND');
@@ -113,8 +116,9 @@ router.post([
     throw new AppError('Seller accounts cannot submit rider verification', 403, 'RIDER_APPLICATION_NOT_ALLOWED');
   }
 
-  const requiredFields = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc', 'profilePhoto'];
+  const requiredFields = ['aadhaarFront', 'aadhaarBack', 'drivingLicense', 'vehicleRc'];
   const missing = requiredFields.filter((field) => !(req.files?.[field]?.length));
+  if (!(req.files?.passportPhoto?.length || req.files?.profilePhoto?.length)) missing.unshift('passportPhoto');
   if (missing.length) {
     throw new AppError(
       `Missing required verification documents: ${missing.join(', ')}`,
@@ -142,6 +146,13 @@ router.post([
       const doc = await uploadDocument(file);
       if (doc) documents.push({ ...doc, alt: field });
     }
+  }
+
+  const passportDocument = documents.find((doc) => doc.alt === 'passportPhoto') || documents.find((doc) => doc.alt === 'profilePhoto');
+  if (passportDocument) {
+    rider.avatar = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
+    if (!rider.riderProfile) rider.riderProfile = {};
+    rider.riderProfile.passportPhoto = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
   }
 
   // An existing customer account may apply to become a rider. Promotion does not
@@ -195,13 +206,8 @@ async function getRider(req) {
 }
 
 async function cashSummary(rider) {
-  const rows = await RiderCashTransaction.aggregate([
-    { $match: { riderId: rider._id, status: 'CONFIRMED' } },
-    { $group: { _id: '$type', total: { $sum: '$amount' } } },
-  ]);
-  const collected = Number(rows.find((x) => x._id === 'COLLECTED')?.total || 0);
-  const deposited = Number(rows.find((x) => x._id === 'DEPOSIT')?.total || 0);
-  const cashInHand = Math.max(0, Number((collected - deposited).toFixed(2)));
+  const authoritative = await riderFinance.cashSummary(rider._id);
+  const cashInHand = Number(authoritative.outstanding || 0);
   const cashLimit = Number(rider.riderProfile?.cashLimit || 2000);
   const remaining = Math.max(0, Number((cashLimit - cashInHand).toFixed(2)));
   const blocked = cashLimit > 0 && cashInHand >= cashLimit;
@@ -211,10 +217,13 @@ async function cashSummary(rider) {
     remainingCashLimit: remaining,
     cashLimitBlocked: blocked,
     minimumCashDepositRequired: blocked ? Math.max(1, Number((cashInHand - cashLimit + 1).toFixed(2))) : 0,
-    totalCashCollected: collected,
-    totalCashDeposited: deposited,
+    totalCashCollected: Number(authoritative.collected || 0),
+    totalCashDeposited: Number(authoritative.deposited || 0),
+    pendingSettlement: Number(authoritative.pendingSettlement || 0),
+    pendingSettlementCount: Number(authoritative.pendingSettlementCount || 0),
+    availableToSettle: Number(authoritative.availableToSettle || 0),
     warningMessage: blocked
-      ? 'Cash holding limit reached. Deposit cash before accepting another COD order.'
+      ? 'Cash holding limit reached. Submit or complete a COD settlement before accepting another COD order.'
       : cashLimit > 0 && cashInHand / cashLimit >= 0.8
         ? 'You are close to the cash holding limit.'
         : '',
@@ -396,6 +405,10 @@ async function dashboard(req, rider) {
     monthly_settlement_day: rate.monthlySettlementDay,
     upiId: rider.riderProfile?.payoutAccount?.upiId || '',
     upi_id: rider.riderProfile?.payoutAccount?.upiId || '',
+    passportPhoto: rider.riderProfile?.passportPhoto || rider.avatar || null,
+    passport_photo: rider.riderProfile?.passportPhoto || rider.avatar || null,
+    profileImage: rider.riderProfile?.passportPhoto?.url || rider.avatar?.url || '',
+    profile_image: rider.riderProfile?.passportPhoto?.url || rider.avatar?.url || '',
     currentOrder: await serializeOrder(current),
     current_order: await serializeOrder(current),
     ...cash,
@@ -644,12 +657,17 @@ router.get(['/delivery/cash/transactions', '/rider/cash/transactions'], ah(async
 }));
 router.post(['/delivery/cash/deposit', '/rider/cash/deposit'], ah(async (req, res) => {
   const rider = await getRider(req);
-  const summary = await cashSummary(rider);
-  const amount = Number(req.body.amount);
-  if (!Number.isFinite(amount) || amount <= 0) throw new AppError('Deposit amount must be greater than zero', 400, 'INVALID_AMOUNT');
-  if (amount > summary.cashInHand + 0.01) throw new AppError('Deposit cannot exceed cash in hand', 409, 'DEPOSIT_EXCEEDS_CASH');
-  await RiderCashTransaction.create({ riderId: rider._id, type: 'DEPOSIT', amount, paymentMethod: req.body.payment_method || req.body.paymentMethod, paymentReference: req.body.payment_reference || req.body.paymentReference });
-  ok(res, await cashSummary(rider), 'Cash deposit recorded');
+  // Backward-compatible endpoint: cash is never cleared immediately anymore.
+  // It creates an auditable request that an administrator must approve.
+  const request = await riderFinance.createCashSettlementRequest(rider, {
+    amount: req.body.amount,
+    note: req.body.note || 'Cash handover request submitted from the rider app',
+    idempotencyKey: req.body.idempotencyKey || req.body.idempotency_key,
+  });
+  ok(res, {
+    ...(await cashSummary(rider)),
+    settlementRequest: riderFinance.serializeSettlement(request),
+  }, 'Cash handover request sent for admin confirmation', 201);
 }));
 
 router.get(['/delivery/payout-account', '/rider/payout-account'], ah(async (req, res) => {
@@ -658,15 +676,26 @@ router.get(['/delivery/payout-account', '/rider/payout-account'], ah(async (req,
 }));
 router.put(['/delivery/payout-account', '/rider/payout-account'], ah(async (req, res) => {
   const rider = await getRider(req);
+  const upiId = String(req.body.upiId || req.body.upi_id || '').trim().toLowerCase();
+  if (upiId && !/^[a-z0-9._-]{2,256}@[a-z][a-z0-9.-]{1,63}$/i.test(upiId)) {
+    throw new AppError('Enter a valid UPI ID', 400, 'INVALID_UPI_ID');
+  }
   rider.riderProfile.payoutAccount = {
-    accountHolderName: req.body.accountHolderName || req.body.account_holder_name,
-    accountNumber: req.body.accountNumber || req.body.account_number,
-    ifsc: req.body.ifsc,
-    bankName: req.body.bankName || req.body.bank_name,
-    upiId: req.body.upiId || req.body.upi_id,
+    accountHolderName: String(req.body.accountHolderName || req.body.account_holder_name || rider.name || '').trim(),
+    accountNumber: String(req.body.accountNumber || req.body.account_number || '').trim(),
+    ifsc: String(req.body.ifsc || '').trim().toUpperCase(),
+    bankName: String(req.body.bankName || req.body.bank_name || '').trim(),
+    upiId,
     verified: false,
   };
   await rider.save();
+  await Notification.create({
+    role: 'ADMIN',
+    title: 'Rider payout account updated',
+    message: `${rider.name} submitted ${upiId ? `UPI ID ${upiId}` : 'updated payout details'}.`,
+    type: 'RIDER_PAYOUT_ACCOUNT_UPDATED',
+    data: { riderId: rider._id, upiId },
+  });
   ok(res, rider.riderProfile.payoutAccount, 'Payout account updated');
 }));
 
