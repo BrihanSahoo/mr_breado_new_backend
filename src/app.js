@@ -98,7 +98,7 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v74-cuisine-media-mobile-admin',
+  apiCompatibility: 'v75-food-media-cloudinary-consistency',
 }));
 
 const mountedRoutes=['./routes/auth','./routes/riderVerificationOnboarding','./routes/misc','./routes/customerCompatibility','./routes/public','./routes/payments','./routes/cartOrders','./routes/admin','./routes/sellerAppCompatibility','./routes/seller','./routes/riderFinance','./routes/riderManagement','./routes/riderAppCompatibility','./routes/rider','./routes/promotionAdmin','./routes/adminWebCompatibility','./routes/compatibility','./routes/production'];

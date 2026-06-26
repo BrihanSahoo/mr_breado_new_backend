@@ -1,14 +1,12 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
-const multer = require('multer');
-const { v2: cloudinary } = require('cloudinary');
 const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
 const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const {
-  User, Outlet, Category, Brand, Product, OutletProduct, Order, OrderEvent,
+  User, Outlet, Category, Brand, Cuisine, Product, OutletProduct, Order, OrderEvent,
   Payment, Refund, OfflineSale, DailyClosing, InventoryMovement, Invoice, BiteStory,
 } = require('../models');
 const settings = require('../services/settingsService');
@@ -18,17 +16,9 @@ const { buildVariantFields, serializeVariantFields } = require('../utils/product
 const deliveryService = require('../services/deliveryService');
 const { findOneCompat, resolveObjectId } = require('../utils/compatId');
 const { Notification } = require('../models');
+const { imageUpload: upload, uploadImage: uploadMedia, deleteImage, imageFromUrl } = require('../services/mediaService');
 
 const r = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (_req,file,cb)=>cb(null,/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) });
-async function uploadMedia(file, folder='products'){
-  if(!file) return null;
-  if(!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) throw new AppError('Cloudinary configuration is required for image upload',503,'IMAGE_STORAGE_NOT_CONFIGURED');
-  cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});
-  const data=`data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
-  const result=await cloudinary.uploader.upload(data,{folder:`mr-breado/${folder}`,resource_type:'image'});
-  return {url:result.secure_url,publicId:result.public_id,alt:file.originalname};
-}
 r.use('/admin', requireAuth, allowRoles('ADMIN'));
 
 const imageUrl = (value) => {
@@ -57,7 +47,7 @@ const normalizeProduct = (p) => p ? ({
   id: String(p._id), productId: String(p._id), title: p.name,
   price: p.basePrice, effectivePrice: p.offerPrice || p.basePrice,
   image: p.images?.[0]?.url || '', imageUrl: p.images?.[0]?.url || '',
-  categoryName: p.categoryId?.name || '', categoryId: p.categoryId?._id || p.categoryId, brandId:p.brandId?._id||p.brandId||null, brandName:p.brandId?.name||'', brandSlug:p.brandId?.slug||'', brand:p.brandId||null, isAvailable: p.active,
+  categoryName: p.categoryId?.name || '', categoryId: p.categoryId?._id || p.categoryId, cuisineId:p.cuisineId?._id||p.cuisineId||null, cuisineName:p.cuisineId?.name||'', cuisineSlug:p.cuisineId?.slug||'', cuisine:p.cuisineId||null, brandId:p.brandId?._id||p.brandId||null, brandName:p.brandId?.name||'', brandSlug:p.brandId?.slug||'', brand:p.brandId||null, foodType:p.foodType, isVeg:p.foodType==='VEG', isAvailable: p.active, isBestseller:Boolean(p.featured),
   ...serializeVariantFields(p),
 }) : null;
 const normalizeOrder = (o) => o ? ({
@@ -98,12 +88,54 @@ async function primaryOutletHandler(req,res){
 }
 r.get(['/admin/mr-breado/restaurant','/admin/mr-breado/store','/admin/primary-outlet','/admin/outlets/primary'],ah(primaryOutletHandler));
 
+const cleanText = (value) => String(value ?? '').trim();
+const asBoolean = (value, fallback = false) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['true', '1', 'yes', 'on', 'active', 'available'].includes(cleanText(value).toLowerCase());
+};
+const imageList = (value) => {
+  if (!value) return [];
+  let source = value;
+  if (typeof source === 'string') {
+    const text = source.trim();
+    if (!text) return [];
+    try { source = JSON.parse(text); } catch (_) { source = text; }
+  }
+  const rows = Array.isArray(source) ? source : [source];
+  return rows.map((item) => {
+    if (typeof item === 'string') return imageFromUrl(item);
+    if (item && typeof item === 'object' && item.url) return {
+      url: cleanText(item.url),
+      publicId: cleanText(item.publicId ?? item.public_id),
+      alt: cleanText(item.alt),
+    };
+    return null;
+  }).filter((item) => item?.url);
+};
+
 async function resolveCategory(body){
   let category=null;
   if(body.categoryId||body.category_id) category=await Category.findById(body.categoryId||body.category_id);
   if(!category&&(body.categoryName||body.category_name||body.category)) category=await Category.findOne({name:new RegExp(`^${String(body.categoryName||body.category_name||body.category).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,'i')});
   if(!category||!category.active) throw new AppError('Select an active Admin category',400,'INVALID_CATEGORY');
   return category;
+}
+
+async function resolveCuisine(body, existing = {}) {
+  const raw = body.cuisineId ?? body.cuisine_id ?? body.cuisine ?? body.cuisineName ?? body.cuisine_name ?? existing.cuisineId;
+  if (!raw) throw new AppError('Select an active cuisine', 400, 'INVALID_CUISINE');
+  let cuisine = null;
+  if (mongoose.isValidObjectId(raw)) cuisine = await Cuisine.findById(raw);
+  if (!cuisine) {
+    const escaped = String(raw).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    cuisine = await Cuisine.findOne({
+      $or: [{ slug: cleanText(raw).toLowerCase() }, { name: new RegExp(`^${escaped}$`, 'i') }],
+      active: true,
+    });
+  }
+  if (!cuisine || !cuisine.active) throw new AppError('Select an active cuisine', 400, 'INVALID_CUISINE');
+  return cuisine;
 }
 
 async function resolveBrand(body, existing={}) {
@@ -116,21 +148,87 @@ async function resolveBrand(body, existing={}) {
   return brand;
 }
 
-async function compatibilityProductPayload(body,existing={}){
-  const category=await resolveCategory(body);
-  const variants=buildVariantFields({...existing,...body},category);
-  const brand=await resolveBrand(body,existing);
-  const images=Array.isArray(body.images)?body.images.map(x=>typeof x==='string'?{url:x}:x).filter(x=>x?.url):(existing.images||[]);
-  return {...body,name:body.name||body.title||existing.name,categoryId:category._id,brandId:brand?._id||null,images,...variants};
+async function compatibilityProductPayload(body, existing = {}) {
+  const name = cleanText(body.name || body.title || existing.name);
+  if (!name) throw new AppError('Food title is required', 400, 'PRODUCT_NAME_REQUIRED');
+  if (name.length > 140) throw new AppError('Food title must be 140 characters or fewer', 400, 'PRODUCT_NAME_TOO_LONG');
+
+  const category = await resolveCategory(body);
+  const cuisine = await resolveCuisine(body, existing);
+  const brand = await resolveBrand(body, existing);
+  const variants = buildVariantFields({ ...existing, ...body }, category);
+
+  const explicitType = cleanText(body.foodType || body.food_type || existing.foodType).toUpperCase().replace('-', '_');
+  const foodType = ['VEG', 'NON_VEG', 'EGG', 'VEGAN', 'OTHER'].includes(explicitType)
+    ? explicitType
+    : (asBoolean(body.isVeg ?? body.is_veg, existing.foodType === 'VEG') ? 'VEG' : 'NON_VEG');
+
+  const suppliedImages = imageList(body.images || body.imageUrl || body.image_url || body.thumbnail);
+  const images = suppliedImages.length ? suppliedImages : imageList(existing.images);
+  const offerPrice = Number(variants.offerPrice ?? 0);
+  const basePrice = Number(variants.basePrice ?? 0);
+  if (!Number.isFinite(basePrice) || basePrice <= 0) {
+    throw new AppError('Food price must be greater than zero', 400, 'INVALID_PRODUCT_PRICE');
+  }
+  if (offerPrice < 0 || (offerPrice > 0 && offerPrice > basePrice)) {
+    throw new AppError('Offer price must be lower than or equal to the base price', 400, 'INVALID_OFFER_PRICE');
+  }
+
+  return {
+    name,
+    description: cleanText(body.description ?? existing.description),
+    categoryId: category._id,
+    cuisineId: cuisine._id,
+    brandId: brand?._id || null,
+    images,
+    foodType,
+    active: asBoolean(body.active ?? body.isAvailable ?? body.available, existing.active ?? true),
+    featured: asBoolean(body.featured ?? body.isFeatured ?? body.bestseller, existing.featured ?? false),
+    ...variants,
+  };
 }
+
 r.route('/admin/mr-breado/products')
- .get(ah(async(req,res)=>ok(res,(await Product.find().populate('categoryId').sort({createdAt:-1}).lean()).map(normalizeProduct))))
- .post(upload.single('image'),ah(async(req,res)=>{const body={...req.body};const uploaded=await uploadMedia(req.file,'products');if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body);const product=await Product.create({...payload,slug:req.body.slug||`${String(payload.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-')}-${require('nanoid').nanoid(5)}`,createdBy:req.user.id});ok(res,normalizeProduct(await Product.findById(product._id).populate('categoryId brandId').lean()),'Product created',201)}));
+ .get(ah(async(req,res)=>ok(res,(await Product.find().populate('categoryId brandId cuisineId').sort({createdAt:-1}).lean()).map(normalizeProduct))))
+ .post(upload.single('image'),ah(async(req,res)=>{
+   const body={...req.body};
+   const uploaded=await uploadMedia(req.file,'products');
+   if(uploaded) body.images=[uploaded];
+   let product;
+   try {
+     const payload=await compatibilityProductPayload(body);
+     if(!payload.images.length) throw new AppError('Select a food image from your device',400,'PRODUCT_IMAGE_REQUIRED');
+     product=await Product.create({...payload,slug:req.body.slug||`${String(payload.name).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')}-${require('nanoid').nanoid(5)}`,createdBy:req.user.id});
+   } catch (error) {
+     if(uploaded?.publicId) await deleteImage(uploaded.publicId);
+     throw error;
+   }
+   ok(res,normalizeProduct(await Product.findById(product._id).populate('categoryId brandId cuisineId').lean()),'Product created',201);
+ }));
 r.route('/admin/mr-breado/products/:id')
- .get(ah(async(req,res)=>{const p=await Product.findById(req.params.id).populate('categoryId brandId').lean();if(!p)throw new AppError('Product not found',404);ok(res,normalizeProduct(p))}))
- .put(upload.single('image'),ah(async(req,res)=>{const existing=await Product.findById(req.params.id).lean();if(!existing)throw new AppError('Product not found',404);const body={...req.body};const uploaded=await uploadMedia(req.file,'products');if(uploaded)body.images=[uploaded];const payload=await compatibilityProductPayload(body,existing);const p=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId brandId').lean();ok(res,normalizeProduct(p),'Product updated')}))
+ .get(ah(async(req,res)=>{const p=await Product.findById(req.params.id).populate('categoryId brandId cuisineId').lean();if(!p)throw new AppError('Product not found',404);ok(res,normalizeProduct(p))}))
+ .put(upload.single('image'),ah(async(req,res)=>{
+   const existing=await Product.findById(req.params.id).lean();
+   if(!existing)throw new AppError('Product not found',404);
+   const body={...req.body};
+   const uploaded=await uploadMedia(req.file,'products');
+   if(uploaded) body.images=[uploaded];
+   let product;
+   try {
+     const payload=await compatibilityProductPayload(body,existing);
+     product=await Product.findByIdAndUpdate(req.params.id,{$set:payload},{new:true,runValidators:true}).populate('categoryId brandId cuisineId').lean();
+   } catch (error) {
+     if(uploaded?.publicId) await deleteImage(uploaded.publicId);
+     throw error;
+   }
+   if(uploaded?.publicId){
+     const previous=(existing.images||[]).find((item)=>item?.publicId)?.publicId;
+     if(previous&&previous!==uploaded.publicId) await deleteImage(previous);
+   }
+   ok(res,normalizeProduct(product),'Product updated');
+ }))
  .delete(ah(async(req,res)=>{await Product.findByIdAndUpdate(req.params.id,{$set:{active:false}});ok(res,null,'Product disabled')}));
-r.patch('/admin/mr-breado/products/:id/availability',ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:req.body.isAvailable??req.body.available??true}},{new:true}).populate('categoryId').lean()))));
+r.patch('/admin/mr-breado/products/:id/availability',ah(async(req,res)=>ok(res,normalizeProduct(await Product.findByIdAndUpdate(req.params.id,{$set:{active:asBoolean(req.body.isAvailable??req.body.available,true)}},{new:true}).populate('categoryId brandId cuisineId').lean()))));
 
 
 const normalizeStory = (story) => {
@@ -165,7 +263,7 @@ r.route('/admin/stories/:id')
    if(uploaded) story.media=uploaded; else {const supplied=imageUrl(req.body.mediaUrl||req.body.thumbnailUrl||req.body.imageUrl||req.body.image);if(supplied)story.media=supplied;}
    await story.save();ok(res,normalizeStory(story),'Story updated');
  }))
- .delete(ah(async(req,res)=>{const story=await BiteStory.findByIdAndDelete(req.params.id);if(!story)throw new AppError('Story not found',404);if(story.media?.publicId){cloudinary.config({cloud_name:process.env.CLOUDINARY_CLOUD_NAME,api_key:process.env.CLOUDINARY_API_KEY,api_secret:process.env.CLOUDINARY_API_SECRET});await cloudinary.uploader.destroy(story.media.publicId).catch(()=>{});}ok(res,null,'Story deleted');}));
+ .delete(ah(async(req,res)=>{const story=await BiteStory.findByIdAndDelete(req.params.id);if(!story)throw new AppError('Story not found',404);if(story.media?.publicId) await deleteImage(story.media.publicId);ok(res,null,'Story deleted');}));
 r.patch('/admin/stories/:id/status',ah(async(req,res)=>{const active=String(req.body.active??req.body.enabled??true)!=='false';const story=await BiteStory.findByIdAndUpdate(req.params.id,{$set:{active}},{new:true,runValidators:true}).lean();if(!story)throw new AppError('Story not found',404);ok(res,normalizeStory(story),'Story status updated');}));
 
 r.route('/admin/brands')

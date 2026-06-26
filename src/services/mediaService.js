@@ -67,7 +67,7 @@ function isSupportedImage(file) {
 
 const imageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_IMAGE_BYTES, files: 1, fields: 20 },
+  limits: { fileSize: MAX_IMAGE_BYTES, files: 1, fields: 60 },
   fileFilter: (_req, file, callback) => {
     if (!isSupportedImage(file)) {
       return callback(new AppError(

@@ -28,7 +28,7 @@ function buildVariantFields(body, category) {
     if (small <= 0) throw new AppError('Small pizza price must be greater than zero', 400, 'INVALID_PIZZA_PRICE');
     return {
       variantType: 'PIZZA', defaultVariant: 'SMALL', basePrice: small,
-      offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, small),
+      offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
       sizePrices: { small, medium, large }, weightPrices: undefined,
       customizationGroups: [{
         name: 'Pizza Size', type: 'SINGLE', required: true, minSelect: 1, maxSelect: 1,
@@ -54,7 +54,7 @@ function buildVariantFields(body, category) {
     });
     return {
       variantType: 'CAKE', defaultVariant: '500_GM', basePrice: gm500,
-      offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, gm500),
+      offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
       weightPrices: { gm500, kg1, kg15, kg2 }, sizePrices: undefined,
       cakeMessageEnabled, cakeMessageCharge,
       customWeightEnabled: b(body.customWeightEnabled ?? body.custom_weight_enabled, false),
@@ -64,7 +64,7 @@ function buildVariantFields(body, category) {
   const basePrice = n(body.basePrice ?? body.price ?? body.sellingPrice);
   return {
     variantType: 'STANDARD', defaultVariant: '', basePrice,
-    offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, basePrice),
+    offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
     sizePrices: undefined, weightPrices: undefined,
     cakeMessageEnabled: false, cakeMessageCharge: 0, customWeightEnabled: false,
     customizationGroups: Array.isArray(body.customizationGroups) ? body.customizationGroups : [],
