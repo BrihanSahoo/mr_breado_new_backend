@@ -1,10 +1,36 @@
-const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {requireAuth,allowRoles}=require('../middleware/auth');const bcrypt=require('bcryptjs');const {nanoid}=require('nanoid');const {User,Outlet,Category,Brand,Product,OutletProduct,Order,Payment,Refund,OfflineSale,DailyClosing,Setting,Banner,Offer,Coupon,InventoryMovement}=require('../models');const settings=require('../services/settingsService');const {AppError}=require('../utils/errors');const {buildVariantFields,serializeVariantFields}=require('../utils/productVariants');const media=require('../services/mediaService');
+const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {requireAuth,allowRoles}=require('../middleware/auth');const bcrypt=require('bcryptjs');const {nanoid}=require('nanoid');const {User,Outlet,Category,Brand,Product,OutletProduct,Order,Payment,Refund,OfflineSale,DailyClosing,Setting,Banner,Offer,Coupon,InventoryMovement}=require('../models');const settings=require('../services/settingsService');const {AppError}=require('../utils/errors');const {buildVariantFields,serializeVariantFields}=require('../utils/productVariants');const media=require('../services/mediaService');const {findOneCompat}=require('../utils/compatId');
 r.use('/admin',requireAuth,allowRoles('ADMIN'));
 const slug=s=>String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const categoryOut=c=>{if(!c)return c;const raw=typeof c.toObject==='function'?c.toObject():c;const url=typeof raw.image==='string'?raw.image:(raw.image?.url||'');return {...raw,id:String(raw._id),title:raw.name,image:url,imageUrl:url,icon:url,status:raw.active?'ACTIVE':'INACTIVE',enabled:Boolean(raw.active)};};
 
 r.get('/admin/dashboard',ah(async(req,res)=>{const [orders,revenue,outlets,customers]=await Promise.all([Order.countDocuments(),Order.aggregate([{$match:{status:'DELIVERED'}},{$group:{_id:null,total:{$sum:'$total'}}}]),Outlet.countDocuments(),User.countDocuments({role:'CUSTOMER'})]);ok(res,{totalOrders:orders,totalSales:revenue[0]?.total||0,totalOutlets:outlets,totalCustomers:customers})}));
-r.route('/admin/outlets').get(ah(async(req,res)=>ok(res,await Outlet.find().sort({primary:-1,createdAt:-1}).lean()))).post(ah(async(req,res)=>ok(res,await Outlet.create({...req.body,open:req.body.open===true,slug:req.body.slug||`${slug(req.body.name)}-${nanoid(4)}`,location:{type:'Point',coordinates:[Number(req.body.longitude||0),Number(req.body.latitude||0)]},createdBy:req.user.id}),'Outlet created',201)));
+const DEFAULT_OUTLET_LOGO='https://res.cloudinary.com/dty0zfd7g/image/upload/v1782468916/mr-breado/brands/file_nzsycz.jpg';
+r.route('/admin/outlets').get(ah(async(req,res)=>ok(res,await Outlet.find().sort({primary:-1,createdAt:-1}).lean()))).post(ah(async(req,res)=>{
+  const body=req.body||{};
+  const addressSource=body.address&&typeof body.address==='object'?body.address:{};
+  const address={
+    line1:String(addressSource.line1||body.addressText||body.address||'').trim(),
+    line2:String(addressSource.line2||body.addressLine2||'').trim(),
+    area:String(addressSource.area||body.area||'').trim(),
+    city:String(addressSource.city||body.city||'').trim(),
+    state:String(addressSource.state||body.state||'').trim(),
+    pincode:String(addressSource.pincode||body.pincode||'').trim(),
+    landmark:String(addressSource.landmark||body.landmark||'').trim(),
+  };
+  const logoValue=body.logo?.url?body.logo:{url:body.logoUrl||body.logo||DEFAULT_OUTLET_LOGO,publicId:'',alt:'Mr. Breado'};
+  const outlet=await Outlet.create({
+    name:String(body.name||'').trim(),
+    slug:body.slug||`${slug(body.name)}-${nanoid(4)}`,
+    code:body.code||undefined,logo:logoValue,coverImage:body.coverImage?.url?body.coverImage:undefined,
+    gstin:body.gstin||'',managerName:body.managerName||'',managerPhone:body.managerPhone||'',email:body.managerEmail||body.email||'',
+    address,deliveryRadiusKm:Math.max(0,Number(body.serviceRadiusKm??body.deliveryRadiusKm??10)),
+    featureToggles:body.featureToggles||body.feature_toggles||undefined,
+    active:body.active!==false,open:body.open===true||body.isOpen===true,primary:body.primary===true,
+    location:{type:'Point',coordinates:[Number(body.longitude??addressSource.longitude??0),Number(body.latitude??addressSource.latitude??0)]},
+    createdBy:req.user.id,
+  });
+  ok(res,outlet,'Outlet created',201);
+}));
 r.get('/admin/outlets/primary',ah(async(req,res)=>ok(res,await Outlet.findOne({primary:true}).lean())));
 r.patch('/admin/outlets/:id/primary',ah(async(req,res)=>{const session=await require('mongoose').startSession();let out;await session.withTransaction(async()=>{await Outlet.updateMany({primary:true},{$set:{primary:false}},{session});out=await Outlet.findByIdAndUpdate(req.params.id,{$set:{primary:true}},{new:true,session});});await session.endSession();ok(res,out,'Primary outlet updated')}));
 r.get('/admin/outlets/:id/full-dashboard',ah(async(req,res)=>{
@@ -127,6 +153,10 @@ r.put(['/admin/settings/google-maps','/admin/google-maps-settings','/admin/maps-
 r.patch(['/admin/settings/google-maps/status','/admin/google-maps-settings/status'],ah(async(req,res)=>ok(res,await settings.setSecret('google_maps_credentials',{enabled:req.body.enabled!==false},req.user.id,{requestId:req.id||req.headers['x-request-id']}),'Google Maps status updated')));
 r.post('/admin/settings/integrations/:key/validate',ah(async(req,res)=>ok(res,await settings.validateIntegration(req.params.key),'Integration validated')));
 r.put('/admin/settings/:key',ah(async(req,res)=>{const key=req.params.key;const requestId=req.id||req.headers['x-request-id'];if(['razorpay_credentials','google_maps_credentials'].includes(key))return ok(res,await settings.setSecret(key,req.body.value||req.body,req.user.id,{active:req.body.active!==false,requestId}),'Integration settings updated');return ok(res,await settings.set(key,req.body.value,req.user.id,req.body.public,{active:req.body.active!==false,requestId}),'Setting updated');}));
+
+r.get('/admin/outlets/:id/controls',ah(async(req,res)=>{const outlet=await findOneCompat(Outlet,req.params.id);if(!outlet)throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');const global=await settings.getBusinessFeatures();ok(res,{outletId:outlet.legacyId||String(outlet._id),featureToggles:{...global.feature_toggles,...(outlet.featureToggles?.toObject?.()||outlet.featureToggles||{})},serviceRadiusKm:Number(outlet.deliveryRadiusKm||0),deliverySettings:outlet.deliverySettings||{}})}));
+r.put('/admin/outlets/:id/controls',ah(async(req,res)=>{const global=await settings.getBusinessFeatures();const source=req.body.featureToggles||req.body.feature_toggles||req.body;const toggles={delivery:source.delivery!==undefined?Boolean(source.delivery):global.feature_toggles.delivery,takeaway:source.takeaway!==undefined?Boolean(source.takeaway):global.feature_toggles.takeaway,cod:source.cod!==undefined?Boolean(source.cod):global.feature_toggles.cod,onlinePayment:source.onlinePayment!==undefined?Boolean(source.onlinePayment):source.online_payment!==undefined?Boolean(source.online_payment):global.feature_toggles.onlinePayment,riderAssignment:source.riderAssignment!==undefined?Boolean(source.riderAssignment):global.feature_toggles.riderAssignment,offers:source.offers!==undefined?Boolean(source.offers):global.feature_toggles.offers};const update={featureToggles:toggles};if(req.body.serviceRadiusKm!==undefined||req.body.deliveryRadiusKm!==undefined)update.deliveryRadiusKm=Math.max(0,Number(req.body.serviceRadiusKm??req.body.deliveryRadiusKm));const current=await findOneCompat(Outlet,req.params.id);if(!current)throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');const outlet=await Outlet.findByIdAndUpdate(current._id,{$set:update},{new:true,runValidators:true}).lean();ok(res,{outletId:outlet.legacyId||String(outlet._id),featureToggles:outlet.featureToggles,serviceRadiusKm:Number(outlet.deliveryRadiusKm||0),deliverySettings:outlet.deliverySettings||{}},'Outlet controls updated')}));
+
 r.get('/admin/inventory/movements',ah(async(req,res)=>ok(res,await InventoryMovement.find(req.query.outletId?{outletId:req.query.outletId}:{}).populate('productId outletId').sort({createdAt:-1}).limit(500).lean())));
 r.get('/admin/daily-closings',ah(async(req,res)=>ok(res,await DailyClosing.find(req.query.outletId?{outletId:req.query.outletId}:{}).populate('outletId sellerId').sort({businessDate:-1}).lean())));
 module.exports=r;

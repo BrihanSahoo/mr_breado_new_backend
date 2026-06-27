@@ -13,7 +13,7 @@ const { serializeVariantFields } = require('../utils/productVariants');
 const { haversineKm } = require('../utils/geo');
 const { findOneCompat } = require('../utils/compatId');
 
-const PRESET_OUTLET_LOGO = 'https://res.cloudinary.com/dswsz53xi/image/upload/v1781831035/mr-breado/brands/qogzsdj39ywandrw1g9f.png';
+const PRESET_OUTLET_LOGO = 'https://res.cloudinary.com/dty0zfd7g/image/upload/v1782468916/mr-breado/brands/file_nzsycz.jpg';
 const active = { active: true };
 
 function imageUrl(value) {
@@ -80,6 +80,7 @@ function outletOut(outlet, extra = {}) {
     image: banner || logo, imageUrl: banner || logo, banner, bannerImage: banner, coverImage: banner,
     distanceKm: Number.isFinite(Number(distanceKm)) ? Number(distanceKm) : undefined,
     distance_km: Number.isFinite(Number(distanceKm)) ? Number(distanceKm) : undefined,
+    featureToggles: outlet.featureToggles || {}, feature_toggles: outlet.featureToggles || {},
     serviceable: typeof serviceable === 'boolean' ? serviceable : undefined,
     outOfRange: typeof serviceable === 'boolean' ? !serviceable : undefined,
   };

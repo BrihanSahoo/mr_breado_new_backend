@@ -133,12 +133,13 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
   if (!['DELIVERY', 'TAKEAWAY'].includes(type)) throw new AppError('Invalid fulfilment type', 400, 'INVALID_FULFILMENT_TYPE');
   if (!Array.isArray(items) || !items.length) throw new AppError('At least one food item is required', 400, 'EMPTY_ORDER');
   const features = await settings.getBusinessFeatures();
-  if (type === 'DELIVERY' && !features.feature_toggles.delivery) throw new AppError('Delivery is currently disabled', 409, 'DELIVERY_DISABLED');
-  if (type === 'TAKEAWAY' && !features.feature_toggles.takeaway) throw new AppError('Takeaway is currently disabled', 409, 'TAKEAWAY_DISABLED');
 
   const outlet = await Outlet.findById(outletId).lean();
   if (!outlet || !outlet.active) throw new AppError('Outlet is unavailable', 409, 'OUTLET_UNAVAILABLE');
   if (!outlet.open) throw new AppError('This outlet is currently closed', 409, 'OUTLET_CLOSED');
+  const outletToggles = { ...features.feature_toggles, ...(outlet.featureToggles || {}) };
+  if (type === 'DELIVERY' && !outletToggles.delivery) throw new AppError('Delivery is currently disabled for this outlet', 409, 'DELIVERY_DISABLED');
+  if (type === 'TAKEAWAY' && !outletToggles.takeaway) throw new AppError('Takeaway is currently disabled for this outlet', 409, 'TAKEAWAY_DISABLED');
   if (!validGstin(outlet.gstin)) throw new AppError('Outlet GSTIN is not configured. Contact the administrator.', 409, 'OUTLET_GSTIN_REQUIRED');
 
   const ids = items.map((item) => item.productId);
@@ -181,7 +182,7 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
   }
 
   const originalDeliveryFee = deliveryFee;
-  const coupon = features.feature_toggles.offers ? await findCoupon({ code: couponCode, subtotal, outletId, items: snapshots, customerId, paymentMethod: method, fulfilmentType: type }) : null;
+  const coupon = outletToggles.offers ? await findCoupon({ code: couponCode, subtotal, outletId, items: snapshots, customerId, paymentMethod: method, fulfilmentType: type }) : null;
   const freeDelivery = coupon && ['FREE_DELIVERY', 'FREEDELIVERY', 'DELIVERY'].includes(String(coupon.type || '').toUpperCase());
   if (freeDelivery) deliveryFee = 0;
   const discount = couponDiscount(coupon, subtotal);
@@ -190,7 +191,7 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
   const takeawayAdvancePercentage = type === 'TAKEAWAY' ? Number(features.takeaway.advanceValue || 0) : 0;
   const payableOnlineAmount = type === 'TAKEAWAY' ? Number((total * takeawayAdvancePercentage / 100).toFixed(2)) : total;
   const balanceDue = type === 'TAKEAWAY' ? Number((total - payableOnlineAmount).toFixed(2)) : 0;
-  return { outlet, snapshots, subtotal: Number(subtotal.toFixed(2)), discount, tax, deliveryCharge: deliveryFee, total, distanceKm, fulfilmentType: type, takeawayAdvancePercentage, payableOnlineAmount, balanceDue, featureToggles: features.feature_toggles, couponCode: coupon?.code || null, coupon, couponSavings, freeDelivery };
+  return { outlet, snapshots, subtotal: Number(subtotal.toFixed(2)), discount, tax, deliveryCharge: deliveryFee, total, distanceKm, fulfilmentType: type, takeawayAdvancePercentage, payableOnlineAmount, balanceDue, featureToggles: outletToggles, couponCode: coupon?.code || null, coupon, couponSavings, freeDelivery };
 }
 
 async function createOrder({ customerId, outletId, items, address, fulfilmentType, paymentMethod, clientRequestId, couponCode }) {
