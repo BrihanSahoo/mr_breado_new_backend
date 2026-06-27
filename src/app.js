@@ -98,7 +98,7 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v79-outlet-stock-smtp-map-user-premium',
+  apiCompatibility: 'v80-rider-backend-admin-consistency',
   previousCompatibility: 'v78-customer-engagement-user-app-consistency',
 }));
 

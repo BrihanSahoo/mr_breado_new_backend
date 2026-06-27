@@ -270,13 +270,37 @@ function calculateRiderPay(distanceKm, rate) {
   );
 }
 
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const values = [lat1, lng1, lat2, lng2].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) return 0;
+  if ((!values[0] && !values[1]) || (!values[2] && !values[3])) return 0;
+  const toRad = (value) => value * Math.PI / 180;
+  const dLat = toRad(values[2] - values[0]);
+  const dLng = toRad(values[3] - values[1]);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(values[0])) * Math.cos(toRad(values[2])) * Math.sin(dLng / 2) ** 2;
+  return Number((6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(2));
+}
+
+function resolvedDeliveryDistance(order, outlet) {
+  const stored = Number(order?.distanceKm || 0);
+  if (stored > 0) return stored;
+  const [outletLng = 0, outletLat = 0] = outlet?.location?.coordinates || [];
+  return haversineKm(
+    outletLat,
+    outletLng,
+    order?.address?.latitude,
+    order?.address?.longitude,
+  );
+}
+
 async function serializeOrder(order, { offer = false } = {}) {
   if (!order) return null;
   const hydrated = order.outletId?.name ? order : await order.populate('outletId customerId');
   const outlet = hydrated.outletId;
   const customer = hydrated.customerId;
   const rate = await riderRate();
-  const distance = Number(hydrated.distanceKm || 0);
+  const distance = resolvedDeliveryDistance(hydrated, outlet);
   const riderPay = calculateRiderPay(distance, rate);
   const cod = hydrated.paymentMethod === 'COD';
   const appStatus = hydrated.status === 'RIDER_ASSIGNED'
@@ -363,7 +387,7 @@ async function serializeOrder(order, { offer = false } = {}) {
 
 async function dashboard(req, rider) {
   const [current, deliveredCount, earningAgg, cash] = await Promise.all([
-    Order.findOne({ riderId: rider._id, status: { $in: ['RIDER_ASSIGNED', 'PICKED_UP'] } }).sort({ updatedAt: -1 }).populate('outletId customerId'),
+    Order.findOne({ riderId: rider._id, status: { $in: ['RIDER_ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'] } }).sort({ updatedAt: -1 }).populate('outletId customerId'),
     Order.countDocuments({ riderId: rider._id, status: 'DELIVERED' }),
     RiderEarning.aggregate([{ $match: { riderId: rider._id } }, { $group: { _id: null, total: { $sum: '$amount' } } }]),
     cashSummary(rider),
@@ -505,7 +529,7 @@ router.post(['/delivery/offers/:id/reject', '/rider/offers/:id/reject'], ah(asyn
 
 router.get(['/delivery/orders/current', '/rider/orders/current'], ah(async (req, res) => {
   const rider = await getRider(req);
-  const order = await Order.findOne({ riderId: rider._id, status: { $in: ['RIDER_ASSIGNED', 'PICKED_UP'] } }).sort({ updatedAt: -1 }).populate('outletId customerId');
+  const order = await Order.findOne({ riderId: rider._id, status: { $in: ['RIDER_ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'] } }).sort({ updatedAt: -1 }).populate('outletId customerId');
   ok(res, await serializeOrder(order));
 }));
 
@@ -576,7 +600,8 @@ router.post(['/delivery/orders/:id/delivered', '/delivery/orders/:id/deliver', '
   if (order.paymentMethod === 'COD' && !order.cashCollected) throw new AppError('Collect COD cash before completing delivery', 409, 'CASH_NOT_COLLECTED');
   const updated = await orderService.changeStatus(order, { id: rider._id, role: 'RIDER' }, 'DELIVERED', null, req.headers['idempotency-key'] || `rider:${rider._id}:delivered:${order._id}`);
   const rate = await riderRate();
-  const distanceKm = Number(updated.distanceKm || 0);
+  const populatedOutlet = updated.outletId?.location ? updated.outletId : await updated.populate('outletId');
+  const distanceKm = resolvedDeliveryDistance(updated, populatedOutlet.outletId || populatedOutlet);
   const earningAmount = calculateRiderPay(distanceKm, rate);
   await RiderEarning.findOneAndUpdate(
     { orderId: updated._id },
