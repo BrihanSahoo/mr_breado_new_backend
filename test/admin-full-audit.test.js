@@ -44,5 +44,5 @@ test('admin compatibility router is mounted before broad legacy admin web router
   const audit = src.indexOf("'./routes/adminUiCompatibility'");
   const legacy = src.indexOf("'./routes/adminWebCompatibility'");
   assert.ok(promotion >= 0 && audit > promotion && legacy > audit);
-  assert.match(src, /v77-admin-full-audit-banner-account/);
+  assert.match(src, /v79-outlet-stock-smtp-map-user-premium/);
 });

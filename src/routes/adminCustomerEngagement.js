@@ -312,9 +312,34 @@ router.get('/admin/email/templates', ah(async (req, res) => {
   ok(res, ['PROMOTIONAL', 'ALERT', 'PAYMENT_REQUEST', 'DOCUMENT', 'GENERAL'].map((category) => emailService.templateFor(category, recipientName)));
 }));
 router.get('/admin/email/config-status', ah(async (_req, res) => {
-  const cfg = emailService.config();
-  ok(res, { configured: cfg.configured, senderConfigured: Boolean(cfg.from), provider: 'RESEND', missing: [!cfg.apiKey ? 'RESEND_API_KEY' : null, !cfg.from ? 'ADMIN_EMAIL_FROM' : null].filter(Boolean) });
+  const cfg = await emailService.config();
+  ok(res, { configured: cfg.configured, senderConfigured: Boolean(cfg.fromEmail), provider: 'SMTP', host: cfg.host || '', port: cfg.port || 587, fromEmail: cfg.fromEmail || '', missing: [!cfg.host ? 'SMTP_HOST' : null, !cfg.user ? 'SMTP_USER' : null, !cfg.password ? 'SMTP_PASSWORD' : null, !cfg.fromEmail ? 'SMTP_FROM_EMAIL' : null].filter(Boolean) });
 }));
+router.get('/admin/email/settings', ah(async (_req, res) => {
+  const admin = await settings.adminSettings();
+  const smtp = admin.secrets.find((row) => row.key === 'smtp_credentials') || {};
+  ok(res, { ...smtp, password: '', user: '', provider: 'SMTP' });
+}));
+router.put('/admin/email/settings', ah(async (req, res) => {
+  const current = await settings.getSmtpConfig(false);
+  const suppliedUser = clean(req.body.user || req.body.username || req.body.smtpUser);
+  const suppliedPassword = String(req.body.password || req.body.smtpPassword || '').trim();
+  const user = suppliedUser.includes('*') ? current.user : suppliedUser || current.user;
+  const password = suppliedPassword.includes('*') ? current.password : suppliedPassword || current.password;
+  await settings.setSecret('smtp_credentials', {
+    host: clean(req.body.host || req.body.smtpHost || current.host),
+    port: Number(req.body.port || req.body.smtpPort || current.port || 587),
+    secure: req.body.secure === true || String(req.body.secure).toLowerCase() === 'true' || Number(req.body.port || current.port) === 465,
+    user, password,
+    fromName: clean(req.body.fromName || current.fromName || 'Mr. Breado'),
+    fromEmail: clean(req.body.fromEmail || current.fromEmail),
+    replyTo: clean(req.body.replyTo || current.replyTo || req.body.fromEmail || current.fromEmail),
+    enabled: req.body.enabled !== false,
+  }, req.user.id, { requestId: req.id });
+  const admin = await settings.adminSettings();
+  ok(res, admin.secrets.find((row) => row.key === 'smtp_credentials') || {}, 'SMTP settings saved');
+}));
+router.post('/admin/email/settings/validate', ah(async (_req, res) => ok(res, await emailService.verify(), 'SMTP connection verified')));
 router.post('/admin/customers/:id/email', attachmentUpload.array('attachments', 5), ah(async (req, res) => sendAdminEmail(req, res, 'CUSTOMER')));
 router.post('/admin/riders/:id/email', attachmentUpload.array('attachments', 5), ah(async (req, res) => sendAdminEmail(req, res, 'RIDER')));
 router.get(['/admin/customers/:id/emails', '/admin/riders/:id/emails'], ah(async (req, res) => {
@@ -333,7 +358,7 @@ router.get('/admin/integrations/health', ah(async (_req, res) => {
     Outlet.find().select('name legacyId active open deliveryRadiusKm featureToggles deliverySettings').lean(),
   ]);
   const cloudinary = Boolean(clean(process.env.CLOUDINARY_URL) || (clean(process.env.CLOUDINARY_CLOUD_NAME) && clean(process.env.CLOUDINARY_API_KEY) && clean(process.env.CLOUDINARY_API_SECRET)));
-  const email = emailService.config();
+  const email = await emailService.config();
   const checks = {
     googleMaps: { configured: Boolean(maps.apiKey), enabled: maps.enabled !== false },
     razorpay: { configured: Boolean(razorpay.keyId && razorpay.keySecret), enabled: razorpay.enabled !== false },

@@ -301,6 +301,8 @@ r.put('/admin/outlets/:id', ah(async(req,res)=>{
 r.get('/admin/outlets/:id/gstin', ah(async(req,res)=>{const o=await Outlet.findById(req.params.id).lean();if(!o)throw new AppError('Outlet not found',404);ok(res,{gstin:o.gstin,invoiceLegalName:o.name,invoiceAddress:[o.address?.line1,o.address?.area,o.address?.city,o.address?.state,o.address?.pincode].filter(Boolean).join(', ')})}));
 r.put('/admin/outlets/:id/gstin', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{gstin:req.body.gstin,name:req.body.invoiceLegalName||undefined,'address.line1':req.body.invoiceAddress||undefined}},{new:true}).lean()))));
 r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>{
+  const outletId=await resolveObjectId(Outlet,req.params.id);
+  if(!outletId)throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
   const radius=Number(req.body.serviceRadiusKm ?? req.body.deliveryRadiusKm ?? req.body.delivery_radius_km ?? req.body.radiusKm ?? req.body.radius_km);
   if(!Number.isFinite(radius)||radius<=0||radius>100) throw new AppError('Delivery radius must be greater than 0 and at most 100 km',400,'INVALID_DELIVERY_RADIUS');
   const coords=await deliveryService.normalizeCoordinates({latitude:req.body.latitude,longitude:req.body.longitude,address:req.body.address,pincode:req.body.pincode,city:req.body.city,state:req.body.state});
@@ -309,8 +311,7 @@ r.post('/admin/outlets/:id/set-location', ah(async(req,res)=>{
   if(req.body.city)set['address.city']=req.body.city;
   if(req.body.state)set['address.state']=req.body.state;
   if(req.body.pincode||coords.pincode)set['address.pincode']=req.body.pincode||coords.pincode;
-  const out=await Outlet.findByIdAndUpdate(req.params.id,{$set:set},{new:true,runValidators:true}).lean();
-  if(!out)throw new AppError('Outlet not found',404);
+  const out=await Outlet.findByIdAndUpdate(outletId,{$set:set},{new:true,runValidators:true}).lean();
   ok(res,{...normalizeOutlet(out),coordinatesCorrected:Boolean(coords.suppliedCoordinatesSwapped)},'Outlet location updated');
 }));
 r.post('/admin/outlets/:id/branding', ah(async(req,res)=>ok(res,normalizeOutlet(await Outlet.findByIdAndUpdate(req.params.id,{$set:{logo:imageUrl(req.body.profileImage||req.body.logo),coverImage:imageUrl(req.body.bannerImage||req.body.coverImage),managerPhone:req.body.phone,email:req.body.email,'address.line1':req.body.address}},{new:true}).lean()))));
@@ -460,6 +461,7 @@ r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
   }
   ok(res,{saved:true,googleMapsApiKeyConfigured:Boolean(apiKey||current?.apiKey)},'API settings saved');
 }));
+r.get('/admin/maps/browser-config', ah(async(_req,res)=>{const cfg=await settings.getGoogleMapsConfig(false);ok(res,{configured:Boolean(cfg.apiKey),enabled:cfg.enabled!==false,apiKey:cfg.enabled!==false?cfg.apiKey:'',message:cfg.apiKey?'Google Maps is ready':'Add a Google Maps API key from API Keys before using the map picker'});}));
 r.post('/admin/api-keys/validate-google', ah(async(req,res)=>ok(res,await settings.validateIntegration('google_maps_credentials'),'Google Maps API key is valid')));
 
 r.get(['/admin/mr-breado/orders','/admin/orders/:id'], ah(async(req,res,next)=>{if(req.params.id){const o=await Order.findById(req.params.id).populate('customerId outletId riderId').lean();if(!o)throw new AppError('Order not found',404);return ok(res,normalizeOrder(o));}return ok(res,(await Order.find().populate('customerId outletId riderId').sort({createdAt:-1}).lean()).map(normalizeOrder));}));

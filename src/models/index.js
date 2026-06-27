@@ -127,7 +127,7 @@ const AdminEmailLog = models.AdminEmailLog || model('AdminEmailLog', new Schema(
   category:{type:String,enum:['PROMOTIONAL','ALERT','PAYMENT_REQUEST','DOCUMENT','GENERAL'],default:'GENERAL',index:true},
   subject:{type:String,required:true}, bodyText:String, bodyHtml:String,
   attachments:[{filename:String,contentType:String,size:Number}],
-  provider:{type:String,default:'RESEND'}, providerMessageId:String,
+  provider:{type:String,default:'SMTP'}, providerMessageId:String,
   status:{type:String,enum:['PENDING','SENT','FAILED'],default:'PENDING',index:true}, errorCode:String,
   sentBy:objectId('User'), sentAt:Date
 },{timestamps:true}));

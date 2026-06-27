@@ -1,4 +1,4 @@
-const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {requireAuth,allowRoles}=require('../middleware/auth');const bcrypt=require('bcryptjs');const {nanoid}=require('nanoid');const {User,Outlet,Category,Brand,Product,OutletProduct,Order,Payment,Refund,OfflineSale,DailyClosing,Setting,Banner,Offer,Coupon,InventoryMovement}=require('../models');const settings=require('../services/settingsService');const {AppError}=require('../utils/errors');const {buildVariantFields,serializeVariantFields}=require('../utils/productVariants');const media=require('../services/mediaService');const {findOneCompat}=require('../utils/compatId');
+const r=require('express').Router();const ah=require('../utils/asyncHandler');const {ok}=require('../utils/respond');const {requireAuth,allowRoles}=require('../middleware/auth');const bcrypt=require('bcryptjs');const {nanoid}=require('nanoid');const {User,Outlet,Category,Brand,Product,OutletProduct,Order,Payment,Refund,OfflineSale,DailyClosing,Setting,Banner,Offer,Coupon,InventoryMovement}=require('../models');const settings=require('../services/settingsService');const {AppError}=require('../utils/errors');const {buildVariantFields,serializeVariantFields}=require('../utils/productVariants');const media=require('../services/mediaService');const {findOneCompat,resolveObjectId}=require('../utils/compatId');
 r.use('/admin',requireAuth,allowRoles('ADMIN'));
 const slug=s=>String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const categoryOut=c=>{if(!c)return c;const raw=typeof c.toObject==='function'?c.toObject():c;const url=typeof raw.image==='string'?raw.image:(raw.image?.url||'');return {...raw,id:String(raw._id),title:raw.name,image:url,imageUrl:url,icon:url,status:raw.active?'ACTIVE':'INACTIVE',enabled:Boolean(raw.active)};};
@@ -79,29 +79,51 @@ r.get('/admin/outlets/:id/full-dashboard',ah(async(req,res)=>{
   ok(res,{outlet,inventory,orders:orders.slice(0,100),recentOrders:orders.slice(0,12),offlineSalesRows:offline,closings,closingCalendar,stockMovements:movementRows,summary,metrics:summary,salesByDay:[...dayMap.values()].sort((a,b)=>a.date.localeCompare(b.date)),statusBreakdown,paymentBreakdown,topFoods:ranked.slice(0,10),bestFoods:ranked.slice(0,10),slowFoods:ranked.slice().reverse().slice(0,10),lowStock:lowStockRows});
 }));
 r.get('/admin/outlets/:id/available-products',ah(async(req,res)=>{
+  const outletId=await resolveObjectId(Outlet,req.params.id);
+  if(!outletId)throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
   const [products,assigned]=await Promise.all([
-    Product.find({active:true}).populate('categoryId brandId').sort({name:1}).lean(),
-    OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean()
+    Product.find({active:true}).populate('categoryId brandId cuisineId').sort({name:1}).lean(),
+    OutletProduct.find({outletId}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'},{path:'cuisineId'}]}).sort({updatedAt:-1}).lean()
   ]);
   const map=new Map(assigned.map(x=>[String(x.productId?._id||x.productId),x]));
-  const all=products.map(p=>{const row=map.get(String(p._id));return {...p,productId:String(p._id),assigned:Boolean(row),outletInventory:row||null,stockQuantity:Number(row?.stockQuantity||0),reservedQuantity:Number(row?.reservedQuantity||0),availableStock:Math.max(0,Number(row?.stockQuantity||0)-Number(row?.reservedQuantity||0)),enabled:row?.enabled??false,available:row?.available??false,lowStockThreshold:Number(row?.lowStockThreshold||5),priceOverride:row?.priceOverride,offerPriceOverride:row?.offerPriceOverride,preparationMinutes:Number(row?.preparationMinutes||20)};});
-  ok(res,{all,assigned,items:assigned});
+  const all=products.map(p=>{const row=map.get(String(p._id));return {...p,productId:String(p._id),assigned:Boolean(row?.enabled),outletInventory:row||null,stockQuantity:Number(row?.stockQuantity||0),reservedQuantity:Number(row?.reservedQuantity||0),availableStock:Math.max(0,Number(row?.stockQuantity||0)-Number(row?.reservedQuantity||0)),enabled:row?.enabled??false,available:row?.available??false,lowStockThreshold:Number(row?.lowStockThreshold||5),priceOverride:row?.priceOverride,offerPriceOverride:row?.offerPriceOverride,preparationMinutes:Number(row?.preparationMinutes||20)};});
+  ok(res,{all,assigned,items:assigned,outletId:String(outletId)});
 }));
 r.post('/admin/outlets/:id/stock',ah(async(req,res)=>{
+  const outletId=await resolveObjectId(Outlet,req.params.id);
+  if(!outletId)throw new AppError('Outlet not found',404,'OUTLET_NOT_FOUND');
   const items=req.body.items||req.body.products||[];
   if(!Array.isArray(items)||!items.length)throw new AppError('At least one outlet product is required',400,'OUTLET_PRODUCTS_REQUIRED');
+  const seen=new Set();
   for(const i of items){
-    const productId=i.productId||i.foodId||i.id;
-    if(!productId)throw new AppError('Product id is required',400,'PRODUCT_ID_REQUIRED');
+    const rawProductId=i.productId||i.foodId||i.id;
+    const productId=await resolveObjectId(Product,rawProductId);
+    if(!productId)throw new AppError('One of the selected foods no longer exists. Refresh the catalog and try again.',404,'PRODUCT_NOT_FOUND');
+    if(seen.has(String(productId)))continue; seen.add(String(productId));
     const enabled=i.enabled??i.selected??i.isEnabled??true;
-    const existing=await OutletProduct.findOne({outletId:req.params.id,productId});
-    if(!enabled){ if(existing) await OutletProduct.updateOne({_id:existing._id},{$set:{enabled:false,available:false}}); continue; }
-    const update={enabled:true};
-    if(existing){ update.available=Boolean(existing.available)&&Number(existing.stockQuantity||0)>0; }
-    else { Object.assign(update,{available:false,stockQuantity:0,reservedQuantity:0,stockInitialized:false,lowStockThreshold:5,preparationMinutes:20}); }
-    await OutletProduct.findOneAndUpdate({outletId:req.params.id,productId},{$set:update,$inc:{version:1}},{upsert:true,new:true,runValidators:true,setDefaultsOnInsert:true});
+    const existing=await OutletProduct.findOne({outletId,productId});
+    const before=Number(existing?.stockQuantity||0);
+    if(!enabled){
+      if(existing) await OutletProduct.updateOne({_id:existing._id},{$set:{enabled:false,available:false,lastStockUpdatedAt:new Date(),lastStockUpdatedBy:req.user.id},$inc:{version:1}});
+      continue;
+    }
+    const rawStock=i.stockQuantity??i.stock_quantity??i.stock??i.quantity??existing?.stockQuantity??0;
+    const stockQuantity=Number(rawStock);
+    if(!Number.isFinite(stockQuantity)||stockQuantity<0||!Number.isInteger(stockQuantity))throw new AppError('Stock quantity must be a whole number equal to or above zero',400,'INVALID_STOCK_QUANTITY');
+    const lowStockThreshold=Math.max(0,Math.trunc(Number(i.lowStockThreshold??i.lowStockAlert??existing?.lowStockThreshold??5)||0));
+    const preparationMinutes=Math.max(0,Math.trunc(Number(i.preparationMinutes??i.preparation_minutes??existing?.preparationMinutes??20)||0));
+    const available=(i.isAvailable??i.available??true)!==false&&stockQuantity>0;
+    const row=await OutletProduct.findOneAndUpdate(
+      {outletId,productId},
+      {$set:{enabled:true,available,stockQuantity,reservedQuantity:Math.min(Number(existing?.reservedQuantity||0),stockQuantity),stockInitialized:true,lowStockThreshold,preparationMinutes,lastStockUpdatedAt:new Date(),lastStockUpdatedBy:req.user.id},$inc:{version:1}},
+      {upsert:true,new:true,runValidators:true,setDefaultsOnInsert:true}
+    );
+    if(before!==stockQuantity){
+      await InventoryMovement.create({outletId,productId,type:'ADMIN_STOCK_SET',quantityBefore:before,quantityChanged:stockQuantity-before,quantityAfter:stockQuantity,reservedBefore:Number(existing?.reservedQuantity||0),reservedAfter:Number(row.reservedQuantity||0),reason:String(i.note||'Admin updated outlet stock'),performedBy:req.user.id,idempotencyKey:`${req.id}:${outletId}:${productId}:${stockQuantity}`}).catch(error=>{if(error?.code!==11000)throw error;});
+    }
   }
-  ok(res,await OutletProduct.find({outletId:req.params.id}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'}]}).sort({updatedAt:-1}).lean(),'Outlet products updated');
+  const rows=await OutletProduct.find({outletId}).populate({path:'productId',populate:[{path:'categoryId'},{path:'brandId'},{path:'cuisineId'}]}).sort({updatedAt:-1}).lean();
+  ok(res,rows,'Outlet products and stock updated');
 }));
 r.route('/admin/categories').get(ah(async(req,res)=>ok(res,(await Category.find().sort({sortOrder:1}).lean()).map(categoryOut)))).post(media.imageUpload.single('image'),ah(async(req,res)=>{const name=String(req.body.name||req.body.title||'').trim();if(!name)throw new AppError('Category name is required',400,'CATEGORY_NAME_REQUIRED');const categorySlug=slug(req.body.slug||name);if(!categorySlug)throw new AppError('Enter a valid category name',400,'CATEGORY_SLUG_INVALID');if(await Category.exists({$or:[{name:{$regex:`^${name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,$options:'i'}},{slug:categorySlug}]}))throw new AppError('A category with this name or slug already exists',409,'CATEGORY_ALREADY_EXISTS');const uploaded=req.file?await media.uploadImage(req.file,'categories'):null;const remote=media.imageFromUrl(req.body.imageUrl||req.body.image||req.body.icon||'','Category image');try{const created=await Category.create({name,slug:categorySlug,image:uploaded||remote||undefined,description:String(req.body.description||''),active:String(req.body.active??req.body.enabled??true)!=='false',sortOrder:Number(req.body.sortOrder||0)});ok(res,categoryOut(created),'Category created',201)}catch(error){if(uploaded?.publicId)await media.deleteImage(uploaded.publicId);throw error}}));
 r.put('/admin/categories/:id',media.imageUpload.single('image'),ah(async(req,res)=>{const existing=await Category.findById(req.params.id);if(!existing)throw new AppError('Category not found',404,'CATEGORY_NOT_FOUND');const name=String(req.body.name||req.body.title||existing.name).trim();const categorySlug=slug(req.body.slug||name||existing.slug);if(await Category.exists({_id:{$ne:existing._id},$or:[{name:{$regex:`^${name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,$options:'i'}},{slug:categorySlug}]}))throw new AppError('A category with this name or slug already exists',409,'CATEGORY_ALREADY_EXISTS');const uploaded=req.file?await media.uploadImage(req.file,'categories'):null;const remote=media.imageFromUrl(req.body.imageUrl||req.body.image||req.body.icon||'','Category image');const previous=existing.image?.publicId||'';existing.name=name;existing.slug=categorySlug;if(req.body.description!==undefined)existing.description=String(req.body.description||'');if(req.body.active!==undefined||req.body.enabled!==undefined)existing.active=String(req.body.active??req.body.enabled)!=='false';if(req.body.sortOrder!==undefined)existing.sortOrder=Number(req.body.sortOrder||0);if(uploaded||remote)existing.image=uploaded||remote;try{await existing.save();if(uploaded?.publicId&&previous&&previous!==uploaded.publicId)await media.deleteImage(previous);ok(res,categoryOut(existing),'Category updated')}catch(error){if(uploaded?.publicId)await media.deleteImage(uploaded.publicId);throw error}}));r.patch('/admin/categories/:id/status',ah(async(req,res)=>{const active=String(req.body.active??req.body.enabled??req.body.status)!=='false'&&String(req.body.status||'').toUpperCase()!=='INACTIVE';const row=await Category.findByIdAndUpdate(req.params.id,{active},{new:true});if(!row)throw new AppError('Category not found',404,'CATEGORY_NOT_FOUND');ok(res,categoryOut(row),'Category status updated')}));r.delete('/admin/categories/:id',ah(async(req,res)=>{const used=await Product.exists({categoryId:req.params.id});if(used)throw new AppError('This category is assigned to foods. Deactivate it instead of deleting it.',409,'CATEGORY_IN_USE');const row=await Category.findByIdAndDelete(req.params.id);if(!row)throw new AppError('Category not found',404,'CATEGORY_NOT_FOUND');if(row.image?.publicId)await media.deleteImage(row.image.publicId);ok(res,null,'Category deleted')}));

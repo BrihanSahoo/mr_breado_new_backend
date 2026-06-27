@@ -2,12 +2,12 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const axios = require('axios');
 const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
 const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const { User, Setting } = require('../models');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 const resetLimiter = rateLimit({
@@ -69,15 +69,14 @@ async function verifyCurrentPassword(userId, currentPassword) {
 }
 
 async function sendResetEmail(to, code) {
-  const apiKey = clean(process.env.RESEND_API_KEY);
-  const from = clean(process.env.ADMIN_RESET_FROM_EMAIL || process.env.RESEND_FROM_EMAIL);
-  if (!apiKey || !from) return false;
-  await axios.post('https://api.resend.com/emails', {
-    from,
-    to: [to],
+  const cfg = await emailService.config();
+  if (!cfg.configured) return false;
+  await emailService.send({
+    to,
     subject: 'Mr. Breado Admin password reset code',
+    text: `Your Mr. Breado admin password reset code is ${code}. It expires in 10 minutes.`,
     html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px"><h2>Admin password reset</h2><p>Use this verification code to reset your Mr. Breado admin password:</p><div style="font-size:32px;font-weight:800;letter-spacing:8px;padding:18px;background:#fff5e8;border-radius:12px;text-align:center">${code}</div><p>This code expires in 10 minutes. If you did not request it, ignore this email.</p></div>`,
-  }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
+  });
   return true;
 }
 
@@ -106,8 +105,9 @@ router.post(['/admin/auth/forgot-password', '/admin/forgot-password'], resetLimi
     try { emailSent = await sendResetEmail(email, code); } catch (_) { emailSent = false; }
   }
 
+  const smtp = await emailService.config();
   ok(res, {
-    emailDeliveryConfigured: Boolean(clean(process.env.RESEND_API_KEY) && clean(process.env.ADMIN_RESET_FROM_EMAIL || process.env.RESEND_FROM_EMAIL)),
+    emailDeliveryConfigured: smtp.configured,
     recoveryKeyAvailable: recoveryAvailable,
     emailSent: admin ? emailSent : false,
   }, 'If the admin account exists, password recovery instructions are available.');

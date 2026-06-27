@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const axios = require('axios');
+const nodemailer = require('nodemailer');
 const env = require('../config/env');
 const { Setting, SettingAudit } = require('../models');
 const { AppError } = require('../utils/errors');
@@ -128,7 +129,7 @@ async function setBusinessFeatures(payload, userId, options={}) {
   return {feature_toggles, takeaway};
 }
 
-const SECRET_KEYS = new Set(['razorpay_credentials', 'google_maps_credentials']);
+const SECRET_KEYS = new Set(['razorpay_credentials', 'google_maps_credentials', 'smtp_credentials']);
 const keyBuffer = () => crypto.createHash('sha256').update(String(env.settingsEncryptionKey)).digest();
 
 function encrypt(value) {
@@ -151,6 +152,12 @@ const mask = (v) => {
 const maskedIntegration = (key, value, row) => {
   if (key === 'razorpay_credentials') return { keyId:mask(value?.keyId), keySecretConfigured:Boolean(value?.keySecret), webhookSecretConfigured:Boolean(value?.webhookSecret), enabled:value?.enabled !== false, active:row?.active !== false, updatedAt:row?.updatedAt, lastValidatedAt:row?.lastValidatedAt };
   if (key === 'google_maps_credentials') return { apiKey:mask(value?.apiKey), configured:Boolean(value?.apiKey), enabled:value?.enabled !== false, active:row?.active !== false, updatedAt:row?.updatedAt, lastValidatedAt:row?.lastValidatedAt };
+  if (key === 'smtp_credentials') return {
+    host:value?.host||'', port:Number(value?.port||587), secure:Boolean(value?.secure), user:mask(value?.user),
+    userConfigured:Boolean(value?.user), passwordConfigured:Boolean(value?.password), fromName:value?.fromName||'Mr. Breado',
+    fromEmail:value?.fromEmail||'', replyTo:value?.replyTo||'', configured:Boolean(value?.host&&value?.user&&value?.password&&value?.fromEmail),
+    enabled:value?.enabled !== false, active:row?.active !== false, updatedAt:row?.updatedAt, lastValidatedAt:row?.lastValidatedAt,
+  };
   return value;
 };
 
@@ -207,6 +214,13 @@ async function setSecret(key, value, userId, options={}) {
   for (const k of Object.keys(merged)) if (merged[k] === '' || merged[k] == null) delete merged[k];
   if (key === 'razorpay_credentials' && merged.enabled !== false && (!merged.keyId || !merged.keySecret)) throw new AppError('Razorpay Key ID and Secret are required when enabled',400,'INVALID_RAZORPAY_SETTINGS');
   if (key === 'google_maps_credentials' && merged.enabled !== false && !merged.apiKey) throw new AppError('Google Maps API key is required when enabled',400,'INVALID_MAPS_SETTINGS');
+  if (key === 'smtp_credentials' && merged.enabled !== false) {
+    const port=Number(merged.port||587);
+    if(!merged.host||!merged.user||!merged.password||!merged.fromEmail) throw new AppError('SMTP host, username, password and sender email are required when email delivery is enabled',400,'INVALID_SMTP_SETTINGS');
+    if(!Number.isInteger(port)||port<1||port>65535) throw new AppError('SMTP port must be between 1 and 65535',400,'INVALID_SMTP_PORT');
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(merged.fromEmail))) throw new AppError('Enter a valid SMTP sender email address',400,'INVALID_SMTP_FROM_EMAIL');
+    merged.port=port; merged.secure=Boolean(merged.secure||port===465);
+  }
   const enc = encrypt(merged);
   const row = await Setting.findOneAndUpdate({key},{$set:{key,...enc,value:undefined,isSecret:true,public:false,active:options.active!==false,updatedBy:userId},$inc:{version:1}},{upsert:true,new:true,setDefaultsOnInsert:true});
   await writeAudit(key, previousRow?'ROTATED':'CREATED', userId, previous, merged, options.requestId);
@@ -227,6 +241,23 @@ async function getGoogleMapsConfig(requireEnabled=true) {
   if (requireEnabled && cfg.enabled === false) throw new AppError('Google Maps is disabled',503,'MAPS_DISABLED');
   return cfg;
 }
+async function getSmtpConfig(requireEnabled=true) {
+  const row = await Setting.findOne({key:'smtp_credentials',active:true}).lean();
+  const dynamic = row ? decrypt(row) : null;
+  const envConfig = {
+    host:String(process.env.SMTP_HOST||'').trim(), port:Number(process.env.SMTP_PORT||587),
+    secure:String(process.env.SMTP_SECURE||'').toLowerCase()==='true'||Number(process.env.SMTP_PORT||587)===465,
+    user:String(process.env.SMTP_USER||process.env.SMTP_USERNAME||'').trim(),
+    password:String(process.env.SMTP_PASSWORD||process.env.SMTP_PASS||'').trim(),
+    fromName:String(process.env.SMTP_FROM_NAME||'Mr. Breado').trim(),
+    fromEmail:String(process.env.SMTP_FROM_EMAIL||process.env.ADMIN_EMAIL_FROM||'').replace(/^.*<|>$/g,'').trim(),
+    replyTo:String(process.env.SMTP_REPLY_TO||process.env.ADMIN_EMAIL_REPLY_TO||'').trim(), enabled:true,
+  };
+  const cfg = dynamic || envConfig;
+  cfg.configured = Boolean(cfg.host&&cfg.user&&cfg.password&&cfg.fromEmail);
+  if (requireEnabled && cfg.enabled === false) throw new AppError('Email delivery is disabled',503,'EMAIL_DISABLED');
+  return cfg;
+}
 async function adminSettings() {
   const rows = await Setting.find().sort({key:1}).lean();
   const regular = rows.filter(r=>!r.isSecret).map(r=>({...r}));
@@ -235,6 +266,7 @@ async function adminSettings() {
   const existingKeys=new Set(rows.map(r=>r.key));
   if(!existingKeys.has('razorpay_credentials')) secrets.push({key:'razorpay_credentials',...maskedIntegration('razorpay_credentials',{keyId:env.razorpay.keyId,keySecret:env.razorpay.keySecret,webhookSecret:env.razorpay.webhookSecret,enabled:true},{active:true})});
   if(!existingKeys.has('google_maps_credentials')) secrets.push({key:'google_maps_credentials',...maskedIntegration('google_maps_credentials',{apiKey:env.googleMapsKey,enabled:true},{active:true})});
+  if(!existingKeys.has('smtp_credentials')) secrets.push({key:'smtp_credentials',...maskedIntegration('smtp_credentials',await getSmtpConfig(false),{active:true})});
   return {regular,secrets};
 }
 async function validateIntegration(key) {
@@ -246,8 +278,12 @@ async function validateIntegration(key) {
     const cfg=await getGoogleMapsConfig();
     const response=await axios.get('https://maps.googleapis.com/maps/api/geocode/json',{params:{address:'Kolkata',key:cfg.apiKey},timeout:10000});
     if (!['OK','ZERO_RESULTS'].includes(response.data?.status)) throw new AppError(`Google Maps validation failed: ${response.data?.status||'UNKNOWN'}`,400,'MAPS_VALIDATION_FAILED');
+  } else if (key === 'smtp_credentials') {
+    const cfg=await getSmtpConfig();
+    const transporter=nodemailer.createTransport({host:cfg.host,port:Number(cfg.port||587),secure:Boolean(cfg.secure),auth:{user:cfg.user,pass:cfg.password},connectionTimeout:12000,greetingTimeout:12000,socketTimeout:15000});
+    await transporter.verify();
   } else throw new AppError('Unsupported integration',400);
   await Setting.updateOne({key},{$set:{lastValidatedAt:new Date()}});
   return {key,valid:true,validatedAt:new Date()};
 }
-module.exports={get,set,setSecret,publicSettings,adminSettings,getRazorpayConfig,getGoogleMapsConfig,validateIntegration,getBusinessFeatures,setBusinessFeatures,getDeliveryPricing,setDeliveryPricing,normalizeDeliveryPricing,normalizeFeatureToggles,normalizeTakeaway,defaults,mask};
+module.exports={get,set,setSecret,publicSettings,adminSettings,getRazorpayConfig,getGoogleMapsConfig,getSmtpConfig,validateIntegration,getBusinessFeatures,setBusinessFeatures,getDeliveryPricing,setDeliveryPricing,normalizeDeliveryPricing,normalizeFeatureToggles,normalizeTakeaway,defaults,mask};

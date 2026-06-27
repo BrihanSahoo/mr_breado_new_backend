@@ -98,8 +98,8 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v78-customer-engagement-user-app-consistency',
-  previousCompatibility: 'v77-admin-full-audit-banner-account',
+  apiCompatibility: 'v79-outlet-stock-smtp-map-user-premium',
+  previousCompatibility: 'v78-customer-engagement-user-app-consistency',
 }));
 
 const mountedRoutes=['./routes/auth','./routes/adminAccount','./routes/riderVerificationOnboarding','./routes/misc','./routes/customerCompatibility','./routes/public','./routes/payments','./routes/cartOrders','./routes/admin','./routes/sellerAppCompatibility','./routes/seller','./routes/riderFinance','./routes/riderManagement','./routes/riderAppCompatibility','./routes/rider','./routes/promotionAdmin','./routes/adminCustomerEngagement','./routes/adminUiCompatibility','./routes/adminWebCompatibility','./routes/compatibility','./routes/production'];
