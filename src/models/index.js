@@ -45,6 +45,7 @@ const Product = models.Product || model('Product', new Schema({
   sizePrices:{small:{type:Number,min:0},medium:{type:Number,min:0},large:{type:Number,min:0}},
   weightPrices:{gm500:{type:Number,min:0},kg1:{type:Number,min:0},kg15:{type:Number,min:0},kg2:{type:Number,min:0}},
   cakeMessageEnabled:{type:Boolean,default:false},cakeMessageCharge:{type:Number,min:0,default:0},customWeightEnabled:{type:Boolean,default:false},
+  customWeightOptions:[{label:{type:String,trim:true},grams:{type:Number,min:1},price:{type:Number,min:0},active:{type:Boolean,default:true}}],
   customizationGroups:[{name:String,type:{type:String,enum:['SINGLE','MULTIPLE']},required:Boolean,minSelect:Number,maxSelect:Number,options:[{name:String,price:Number,active:{type:Boolean,default:true},default:{type:Boolean,default:false}}]}], createdBy:objectId('User')
 },{timestamps:true}));
 

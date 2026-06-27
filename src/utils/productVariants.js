@@ -12,6 +12,29 @@ const categoryKind = (category) => {
   if (value.includes('cake')) return 'CAKE';
   return 'STANDARD';
 };
+
+const parseCustomWeights = (value) => {
+  if (value === undefined || value === null || value === '') return [];
+  let rows = value;
+  if (typeof rows === 'string') {
+    try { rows = JSON.parse(rows); } catch (_) { throw new AppError('Custom cake weights must be valid JSON', 400, 'INVALID_CUSTOM_WEIGHTS'); }
+  }
+  if (!Array.isArray(rows)) throw new AppError('Custom cake weights must be a list', 400, 'INVALID_CUSTOM_WEIGHTS');
+  const seen = new Set();
+  return rows.map((row, index) => {
+    const label = clean(row?.label ?? row?.name ?? row?.weight);
+    const grams = Number(row?.grams ?? row?.weightGrams ?? row?.weight_grams);
+    const price = Number(row?.price);
+    if (!label) throw new AppError(`Custom weight ${index + 1} needs a label`, 400, 'INVALID_CUSTOM_WEIGHT_LABEL');
+    if (!Number.isFinite(grams) || grams <= 0) throw new AppError(`Custom weight ${label} needs valid grams`, 400, 'INVALID_CUSTOM_WEIGHT_GRAMS');
+    if (!Number.isFinite(price) || price <= 0) throw new AppError(`Custom weight ${label} needs a valid price`, 400, 'INVALID_CUSTOM_WEIGHT_PRICE');
+    const key = label.toLowerCase().replace(/\s+/g, '');
+    if (seen.has(key)) throw new AppError(`Duplicate custom weight: ${label}`, 400, 'DUPLICATE_CUSTOM_WEIGHT');
+    seen.add(key);
+    return { label, grams: Math.round(grams), price: Number(price.toFixed(2)), active: row?.active !== false };
+  }).sort((a,b)=>a.grams-b.grams);
+};
+
 const option = (name, absolutePrice, basePrice, isDefault = false) => ({
   name,
   price: Number(Math.max(0, n(absolutePrice) - n(basePrice)).toFixed(2)),
@@ -44,9 +67,14 @@ function buildVariantFields(body, category) {
     if (gm500 <= 0) throw new AppError('500gm cake price must be greater than zero', 400, 'INVALID_CAKE_PRICE');
     const cakeMessageEnabled = b(body.cakeMessageEnabled ?? body.cake_message_enabled, false);
     const cakeMessageCharge = n(body.cakeMessageCharge ?? body.cake_message_charge, 0);
+    const customWeightEnabled = b(body.customWeightEnabled ?? body.custom_weight_enabled, false);
+    const customWeightOptions = customWeightEnabled ? parseCustomWeights(body.customWeightOptions ?? body.custom_weight_options) : [];
     const groups = [{
       name: 'Cake Weight', type: 'SINGLE', required: true, minSelect: 1, maxSelect: 1,
-      options: [option('500 gm', gm500, gm500, true), option('1 kg', kg1, gm500), option('1.5 kg', kg15, gm500), option('2 kg', kg2, gm500)],
+      options: [
+        option('500 gm', gm500, gm500, true), option('1 kg', kg1, gm500), option('1.5 kg', kg15, gm500), option('2 kg', kg2, gm500),
+        ...customWeightOptions.filter((x) => x.active).map((x) => option(x.label, x.price, gm500)),
+      ],
     }];
     if (cakeMessageEnabled) groups.push({
       name: 'Cake Message', type: 'SINGLE', required: false, minSelect: 0, maxSelect: 1,
@@ -57,7 +85,7 @@ function buildVariantFields(body, category) {
       offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
       weightPrices: { gm500, kg1, kg15, kg2 }, sizePrices: undefined,
       cakeMessageEnabled, cakeMessageCharge,
-      customWeightEnabled: b(body.customWeightEnabled ?? body.custom_weight_enabled, false),
+      customWeightEnabled, customWeightOptions,
       customizationGroups: groups,
     };
   }
@@ -66,7 +94,7 @@ function buildVariantFields(body, category) {
     variantType: 'STANDARD', defaultVariant: '', basePrice,
     offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
     sizePrices: undefined, weightPrices: undefined,
-    cakeMessageEnabled: false, cakeMessageCharge: 0, customWeightEnabled: false,
+    cakeMessageEnabled: false, cakeMessageCharge: 0, customWeightEnabled: false, customWeightOptions: [],
     customizationGroups: Array.isArray(body.customizationGroups) ? body.customizationGroups : [],
   };
 }
@@ -88,6 +116,7 @@ function serializeVariantFields(product) {
     cakeMessageEnabled: Boolean(product.cakeMessageEnabled), cake_message_enabled: Boolean(product.cakeMessageEnabled),
     cakeMessageCharge: n(product.cakeMessageCharge), cake_message_charge: n(product.cakeMessageCharge),
     customWeightEnabled: Boolean(product.customWeightEnabled), custom_weight_enabled: Boolean(product.customWeightEnabled),
+    customWeightOptions: product.customWeightOptions || [], custom_weight_options: product.customWeightOptions || [],
     customizationGroups: product.customizationGroups || [], customization_groups: product.customizationGroups || [],
   };
 }

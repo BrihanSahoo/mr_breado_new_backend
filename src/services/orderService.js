@@ -120,9 +120,16 @@ function choosePrice(product, outletProduct, input) {
   }
   const weightKey = { '500gm': 'gm500', '500g': 'gm500', '1kg': 'kg1', '1.5kg': 'kg15', '2kg': 'kg2' }[selectedWeight];
   if (product.variantType === 'CAKE') {
-    if (!weightKey) throw new AppError('Select a valid cake weight', 400, 'CAKE_WEIGHT_REQUIRED');
-    if (product.weightPrices?.[weightKey] == null) throw new AppError('Selected cake weight is unavailable', 409, 'CAKE_WEIGHT_UNAVAILABLE');
-    price = Number(product.weightPrices[weightKey]);
+    if (weightKey) {
+      if (product.weightPrices?.[weightKey] == null) throw new AppError('Selected cake weight is unavailable', 409, 'CAKE_WEIGHT_UNAVAILABLE');
+      price = Number(product.weightPrices[weightKey]);
+    } else {
+      const custom = (product.customWeightOptions || []).find((row) =>
+        row.active !== false && String(row.label || '').trim().toLowerCase().replace(/\s+/g, '') === compactWeight
+      );
+      if (!custom) throw new AppError('Select a valid cake weight', 400, 'CAKE_WEIGHT_REQUIRED');
+      price = Number(custom.price);
+    }
   }
   return { price, selectedSize, selectedWeight };
 }
