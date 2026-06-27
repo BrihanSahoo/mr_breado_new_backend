@@ -139,8 +139,14 @@ async function resolveCuisine(body, existing = {}) {
 }
 
 async function resolveBrand(body, existing={}) {
-  const raw = body.brandId ?? body.brand_id ?? body.brand ?? body.brandSlug ?? body.brand_slug ?? existing.brandId;
-  if (!raw) return null;
+  const hasExplicitBrand = ['brandId','brand_id','brand','brandSlug','brand_slug']
+    .some((key) => Object.prototype.hasOwnProperty.call(body, key));
+  const raw = hasExplicitBrand
+    ? (body.brandId ?? body.brand_id ?? body.brand ?? body.brandSlug ?? body.brand_slug)
+    : existing.brandId;
+  // An explicitly empty value means the admin selected “No brand”. This must
+  // clear a previously assigned brand instead of silently keeping it.
+  if (!cleanText(raw)) return null;
   let brand = null;
   if (mongoose.isValidObjectId(raw)) brand = await Brand.findById(raw);
   if (!brand) brand = await Brand.findOne({ $or:[{slug:String(raw).toLowerCase()},{name:new RegExp(`^${String(raw).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`,'i')}], active:true });

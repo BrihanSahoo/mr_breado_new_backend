@@ -54,6 +54,25 @@ async function menu(outletId, query = {}) {
     .lean();
   const search = text(query.search ?? query.q).toLowerCase();
   const category = text(query.categoryId ?? query.category).toLowerCase();
+  const requestedBrand = text(query.brandId ?? query.brand_id ?? query.brandSlug ?? query.brand_slug ?? query.brand).toLowerCase();
+
+  // Brand pages must be strict. A requested brand is resolved only against an
+  // active admin-created Brand record, and products without that exact brandId
+  // are excluded. Never infer a brand from product/outlet names.
+  let resolvedBrandId = '';
+  if (requestedBrand) {
+    const brand = await Brand.findOne({
+      active: true,
+      $or: [
+        ...(require('mongoose').isValidObjectId(requestedBrand) ? [{ _id: requestedBrand }] : []),
+        { slug: requestedBrand },
+        { name: new RegExp(`^${requestedBrand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+      ],
+    }).select('_id slug').lean();
+    if (!brand) return [];
+    resolvedBrandId = String(brand._id);
+  }
+
   return rows
     .filter((row) => row.productId && row.outletId)
     .filter((row) => !search || [row.productId.name, row.productId.description, row.productId.sku].some((v) => text(v).toLowerCase().includes(search)))
@@ -63,6 +82,7 @@ async function menu(outletId, query = {}) {
       text(row.productId.categoryId?.slug).toLowerCase(),
       text(row.productId.categoryId?.name).toLowerCase()
     ].includes(category))
+    .filter((row) => !resolvedBrandId || String(row.productId.brandId?._id || row.productId.brandId || '') === resolvedBrandId)
     .map((row) => ({
       ...row.productId,
       ...serializeVariantFields(row.productId),
@@ -74,6 +94,13 @@ async function menu(outletId, query = {}) {
       imageUrl: imageUrl(row.productId.images),
       thumbnail: imageUrl(row.productId.images),
       categoryName: row.productId.categoryId?.name || '',
+      brandId: row.productId.brandId?._id ? String(row.productId.brandId._id) : '',
+      brand_id: row.productId.brandId?._id ? String(row.productId.brandId._id) : '',
+      brandName: row.productId.brandId?.name || '',
+      brand_name: row.productId.brandId?.name || '',
+      brandSlug: row.productId.brandId?.slug || '',
+      brand_slug: row.productId.brandId?.slug || '',
+      brand: row.productId.brandId || null,
       foodType: row.productId.foodType,
       food_type: row.productId.foodType,
       isVeg: row.productId.foodType === 'VEG',
