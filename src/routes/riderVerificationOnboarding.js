@@ -1,5 +1,6 @@
 const express = require('express');
 const multer = require('multer');
+const path = require('path');
 const { v2: cloudinary } = require('cloudinary');
 const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
@@ -7,14 +8,35 @@ const { requireAuth } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const { User, VerificationRequest, Notification, RiderLocation } = require('../models');
 const { normalizeRole } = require('../utils/roles');
+const { configureCloudinary } = require('../services/mediaService');
 
 const router = express.Router();
+const MAX_VERIFICATION_FILE_BYTES = 8 * 1024 * 1024;
+const VERIFICATION_EXTENSIONS = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.heic', '.heif', '.pdf',
+]);
+
+function isSupportedVerificationFile(file) {
+  const mime = String(file?.mimetype || '').trim().toLowerCase();
+  const extension = path.extname(String(file?.originalname || '')).toLowerCase();
+  if (mime === 'application/pdf' || mime.startsWith('image/')) return true;
+  return mime === 'application/octet-stream' && VERIFICATION_EXTENSIONS.has(extension);
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024, files: 6 },
+  limits: {
+    fileSize: MAX_VERIFICATION_FILE_BYTES,
+    files: 6,
+    fields: 40,
+  },
   fileFilter: (_req, file, cb) => {
-    if (!/^image\//i.test(file.mimetype) && file.mimetype !== 'application/pdf') {
-      return cb(new AppError('Only image or PDF verification documents are allowed', 400, 'INVALID_FILE_TYPE'));
+    if (!isSupportedVerificationFile(file)) {
+      return cb(new AppError(
+        'Upload a clear JPG, PNG, WebP, HEIC, or PDF verification document.',
+        415,
+        'UNSUPPORTED_VERIFICATION_FILE',
+      ));
     }
     cb(null, true);
   },
@@ -22,20 +44,64 @@ const upload = multer({
 
 async function uploadDocument(file) {
   if (!file) return null;
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-    throw new AppError('Cloudinary configuration is required for rider verification documents', 503, 'CLOUDINARY_NOT_CONFIGURED');
+  configureCloudinary();
+
+  try {
+    const uploaded = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'mr-breado/rider-verification',
+          resource_type: 'auto',
+          use_filename: true,
+          unique_filename: true,
+          overwrite: false,
+          invalidate: true,
+        },
+        (error, result) => error ? reject(error) : resolve(result),
+      );
+      stream.end(file.buffer);
+    });
+
+    return {
+      url: uploaded.secure_url || uploaded.url || '',
+      publicId: uploaded.public_id || '',
+      alt: file.originalname || '',
+      resourceType: uploaded.resource_type || 'image',
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const status = Number(error?.http_code || error?.status || 0);
+    const detail = String(error?.message || '');
+    if (status === 401 || /api key|signature|cloud name|credentials/i.test(detail)) {
+      throw new AppError(
+        'Verification document storage is temporarily unavailable.',
+        503,
+        'VERIFICATION_STORAGE_AUTH_FAILED',
+      );
+    }
+    if (/timeout|timed out|network|socket|connect/i.test(detail)) {
+      throw new AppError(
+        'Verification upload is taking longer than expected. Please try again.',
+        503,
+        'VERIFICATION_UPLOAD_UNAVAILABLE',
+      );
+    }
+    throw new AppError(
+      'The verification documents could not be uploaded right now. Please try again.',
+      502,
+      'VERIFICATION_UPLOAD_FAILED',
+    );
   }
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-  });
-  const data = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
-  const result = await cloudinary.uploader.upload(data, {
-    folder: 'mr-breado/rider-verification',
-    resource_type: 'auto',
-  });
-  return { url: result.secure_url, publicId: result.public_id, alt: file.originalname };
+}
+
+async function cleanupUploadedDocuments(documents) {
+  await Promise.allSettled((documents || []).map(async (document) => {
+    if (!document?.publicId) return;
+    await cloudinary.uploader.destroy(document.publicId, {
+      resource_type: document.resourceType || 'image',
+      invalidate: true,
+    });
+  }));
 }
 
 function assertApplicant(user) {
@@ -119,52 +185,81 @@ router.post('/rider-verification/submit', upload.fields([
     throw new AppError('A rider verification request is already pending admin review', 409, 'VERIFICATION_ALREADY_PENDING');
   }
 
-  const documents = [];
-  for (const [field, files] of Object.entries(req.files || {})) {
-    for (const file of files) {
-      const uploaded = await uploadDocument(file);
-      documents.push({ ...uploaded, alt: field });
+  const uploadedDocuments = [];
+  let request = null;
+
+  try {
+    for (const [field, files] of Object.entries(req.files || {})) {
+      for (const file of files) {
+        const uploaded = await uploadDocument(file);
+        uploadedDocuments.push({ ...uploaded, alt: field });
+      }
     }
-  }
 
-  const passportDocument = documents.find((doc) => doc.alt === 'passportPhoto') || documents.find((doc) => doc.alt === 'profilePhoto');
-  if (passportDocument) {
-    rider.avatar = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
+    const documents = uploadedDocuments.map(({ url, publicId, alt }) => ({
+      url,
+      publicId,
+      alt,
+    }));
+
+    request = await VerificationRequest.create({
+      userId: rider._id,
+      type: 'RIDER',
+      status: 'PENDING',
+      documents,
+      note: JSON.stringify({
+        ...req.body,
+        source: req.body?.source || 'RIDER_APP_UNIQUE_ONBOARDING',
+      }),
+    });
+
+    const passportDocument = documents.find((doc) => doc.alt === 'passportPhoto')
+      || documents.find((doc) => doc.alt === 'profilePhoto');
+    if (passportDocument) {
+      rider.avatar = {
+        url: passportDocument.url,
+        publicId: passportDocument.publicId,
+        alt: 'passportPhoto',
+      };
+      if (!rider.riderProfile) rider.riderProfile = {};
+      rider.riderProfile.passportPhoto = {
+        url: passportDocument.url,
+        publicId: passportDocument.publicId,
+        alt: 'passportPhoto',
+      };
+    }
+
+    if (currentRole !== 'RIDER') rider.role = 'RIDER';
     if (!rider.riderProfile) rider.riderProfile = {};
-    rider.riderProfile.passportPhoto = { url: passportDocument.url, publicId: passportDocument.publicId, alt: 'passportPhoto' };
+    rider.riderProfile.verificationStatus = 'PENDING';
+    rider.riderProfile.online = false;
+    rider.riderProfile.available = false;
+    await rider.save();
+
+    // A notification failure must not roll back a successfully stored request.
+    await Notification.create({
+      userId: rider._id,
+      role: 'RIDER',
+      title: 'Verification submitted',
+      message: 'Your documents were submitted successfully and are awaiting admin review.',
+      type: 'RIDER_VERIFICATION',
+      data: { verificationRequestId: request._id, status: 'PENDING' },
+    }).catch(() => null);
+
+    ok(res, {
+      ...request.toObject(),
+      status: 'PENDING',
+      requestStatus: 'PENDING',
+      pending: true,
+      verified: false,
+    }, 'Rider verification submitted', 201);
+  } catch (error) {
+    if (request?._id) {
+      await VerificationRequest.deleteOne({ _id: request._id }).catch(() => null);
+    }
+    await cleanupUploadedDocuments(uploadedDocuments);
+    throw error;
   }
-
-  if (currentRole !== 'RIDER') rider.role = 'RIDER';
-  if (!rider.riderProfile) rider.riderProfile = {};
-  rider.riderProfile.verificationStatus = 'PENDING';
-  rider.riderProfile.online = false;
-  rider.riderProfile.available = false;
-  await rider.save();
-
-  const request = await VerificationRequest.create({
-    userId: rider._id,
-    type: 'RIDER',
-    status: 'PENDING',
-    documents,
-    note: JSON.stringify({ ...req.body, source: req.body?.source || 'RIDER_APP_UNIQUE_ONBOARDING' }),
-  });
-
-  await Notification.create({
-    userId: rider._id,
-    role: 'RIDER',
-    title: 'Verification submitted',
-    message: 'Your documents were submitted successfully and are awaiting admin review.',
-    type: 'RIDER_VERIFICATION',
-    data: { verificationRequestId: request._id, status: 'PENDING' },
-  });
-
-  ok(res, {
-    ...request.toObject(),
-    status: 'PENDING',
-    requestStatus: 'PENDING',
-    pending: true,
-    verified: false,
-  }, 'Rider verification submitted', 201);
 }));
 
 

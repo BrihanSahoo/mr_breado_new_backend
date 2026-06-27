@@ -146,6 +146,8 @@ function imageFromUrl(value, alt = '') {
 module.exports = {
   MAX_IMAGE_BYTES,
   imageUpload,
+  cloudinaryCredentials,
+  configureCloudinary,
   uploadImage,
   deleteImage,
   imageFromUrl,
