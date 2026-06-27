@@ -98,10 +98,10 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v75-food-media-cloudinary-consistency',
+  apiCompatibility: 'v77-admin-full-audit-banner-account',
 }));
 
-const mountedRoutes=['./routes/auth','./routes/riderVerificationOnboarding','./routes/misc','./routes/customerCompatibility','./routes/public','./routes/payments','./routes/cartOrders','./routes/admin','./routes/sellerAppCompatibility','./routes/seller','./routes/riderFinance','./routes/riderManagement','./routes/riderAppCompatibility','./routes/rider','./routes/promotionAdmin','./routes/adminWebCompatibility','./routes/compatibility','./routes/production'];
+const mountedRoutes=['./routes/auth','./routes/adminAccount','./routes/riderVerificationOnboarding','./routes/misc','./routes/customerCompatibility','./routes/public','./routes/payments','./routes/cartOrders','./routes/admin','./routes/sellerAppCompatibility','./routes/seller','./routes/riderFinance','./routes/riderManagement','./routes/riderAppCompatibility','./routes/rider','./routes/promotionAdmin','./routes/adminUiCompatibility','./routes/adminWebCompatibility','./routes/compatibility','./routes/production'];
 for (const route of mountedRoutes) app.use(env.apiPrefix, require(route));
 
 app.use((req, res) => res.status(404).json({

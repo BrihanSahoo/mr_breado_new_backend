@@ -1,6 +1,4 @@
 const express = require('express');
-const multer = require('multer');
-const { v2: cloudinary } = require('cloudinary');
 const mongoose = require('mongoose');
 const ah = require('../utils/asyncHandler');
 const { ok } = require('../utils/respond');
@@ -8,13 +6,10 @@ const { requireAuth, allowRoles } = require('../middleware/auth');
 const { AppError } = require('../utils/errors');
 const { Banner, Coupon, CouponUsage, Outlet, Order } = require('../models');
 const promotions = require('../services/promotionService');
+const media = require('../services/mediaService');
+const { resolveObjectId } = require('../utils/compatId');
 
 const router = express.Router();
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 6 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => cb(null, /^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)),
-});
 
 router.use('/admin', requireAuth, allowRoles('ADMIN'));
 
@@ -45,23 +40,6 @@ function imageUrl(value) {
   if (!value) return '';
   if (typeof value === 'string') return value.trim();
   return value.url || value.secureUrl || value.secure_url || '';
-}
-
-async function uploadImage(file, folder) {
-  if (!file) return null;
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-    throw new AppError('Cloudinary configuration is required for image upload', 503, 'CLOUDINARY_NOT_CONFIGURED');
-  }
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-  });
-  const result = await cloudinary.uploader.upload(`data:${file.mimetype};base64,${file.buffer.toString('base64')}`, {
-    folder: `mr-breado/${folder}`,
-    resource_type: 'image',
-  });
-  return { url: result.secure_url, publicId: result.public_id, alt: file.originalname };
 }
 
 function pagination(req) {
@@ -122,48 +100,85 @@ function bannerOut(doc, coupon = null) {
 async function validateScope(outletIds, appliesToAllOutlets) {
   if (appliesToAllOutlets) return [];
   if (!outletIds.length) throw new AppError('Select at least one outlet or enable all outlets', 400, 'OUTLET_SCOPE_REQUIRED');
-  const count = await Outlet.countDocuments({ _id: { $in: outletIds }, active: true });
-  if (count !== outletIds.length) throw new AppError('One or more selected outlets are invalid', 400, 'INVALID_OUTLET_SCOPE');
-  return outletIds;
+
+  const resolved = [];
+  for (const value of outletIds) {
+    const id = await resolveObjectId(Outlet, value, { active: true });
+    if (!id) throw new AppError('One or more selected outlets are invalid', 400, 'INVALID_OUTLET_SCOPE');
+    const text = String(id);
+    if (!resolved.some((item) => String(item) === text)) resolved.push(id);
+  }
+  return resolved;
+}
+
+function validRemoteImage(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const image = media.imageFromUrl(text, 'Banner image');
+  if (!image) throw new AppError('Enter a valid HTTPS image URL', 400, 'INVALID_IMAGE_URL');
+  return image;
 }
 
 async function bannerPayload(req, existing = null) {
-  const outletIds = array(req.body.outletIds ?? req.body.outlet_ids);
-  const appliesToAllOutlets = bool(req.body.appliesToAllOutlets ?? req.body.applies_to_all_outlets, outletIds.length === 0);
-  await validateScope(outletIds, appliesToAllOutlets);
+  const requestedIds = array(req.body.outletIds ?? req.body.outlet_ids);
+  const appliesToAllOutlets = bool(
+    req.body.appliesToAllOutlets ?? req.body.applies_to_all_outlets,
+    requestedIds.length === 0,
+  );
+  const outletIds = await validateScope(requestedIds, appliesToAllOutlets);
+
   const couponCode = String(req.body.couponCode || req.body.code || '').trim().toUpperCase();
   let coupon = null;
   if (couponCode) {
     coupon = await Coupon.findOne({ code: couponCode });
     if (!coupon) throw new AppError('Selected coupon does not exist', 409, 'COUPON_NOT_FOUND');
+    if (coupon.active === false) throw new AppError('Selected coupon is inactive', 409, 'COUPON_INACTIVE');
+    if (coupon.endAt && new Date(coupon.endAt) <= new Date()) throw new AppError('Selected coupon has expired', 409, 'COUPON_EXPIRED');
+
+    if (!appliesToAllOutlets && coupon.appliesToAllOutlets !== true && Array.isArray(coupon.outletIds) && coupon.outletIds.length) {
+      const allowed = new Set(coupon.outletIds.map(String));
+      const incompatible = outletIds.some((id) => !allowed.has(String(id)));
+      if (incompatible) throw new AppError('The selected coupon is not available for every selected outlet', 409, 'COUPON_OUTLET_MISMATCH');
+    }
   }
+
   const startAt = date(req.body.startsAt ?? req.body.startAt ?? req.body.validFrom);
   const endAt = date(req.body.endsAt ?? req.body.endAt ?? req.body.expiresAt ?? req.body.validTo);
   if (startAt && endAt && startAt >= endAt) throw new AppError('Banner end time must be after its start time', 400, 'INVALID_DATE_RANGE');
-  const uploaded = await uploadImage(req.file, 'banners');
-  const remote = String(req.body.image || req.body.imageUrl || '').trim();
-  const image = uploaded || (remote ? { url: remote } : existing?.image || null);
+
+  const title = String(req.body.title || '').trim();
+  if (!title) throw new AppError('Banner title is required', 400, 'BANNER_TITLE_REQUIRED');
+  if (title.length > 120) throw new AppError('Banner title must be 120 characters or fewer', 400, 'BANNER_TITLE_TOO_LONG');
+
+  const uploaded = req.file ? await media.uploadImage(req.file, 'banners') : null;
+  const remote = validRemoteImage(req.body.image || req.body.imageUrl);
+  const image = uploaded || remote || existing?.image || null;
+
   return {
-    title: String(req.body.title || '').trim(),
-    subtitle: String(req.body.subtitle || '').trim(),
-    description: String(req.body.description || '').trim(),
-    image,
-    actionType: couponCode ? 'COUPON' : String(req.body.actionType || '').trim().toUpperCase(),
-    actionValue: couponCode || String(req.body.actionValue || '').trim(),
-    couponId: coupon?._id || null,
-    couponCode: couponCode || '',
-    appliesToAllOutlets,
-    outletIds: appliesToAllOutlets ? [] : outletIds,
-    startAt, endAt,
-    active: bool(req.body.enabled ?? req.body.active, true),
-    sortOrder: Number(req.body.priority ?? req.body.sortOrder ?? 0) || 0,
+    payload: {
+      title,
+      subtitle: String(req.body.subtitle || '').trim().slice(0, 180),
+      description: String(req.body.description || '').trim().slice(0, 1000),
+      image,
+      actionType: couponCode ? 'COUPON' : String(req.body.actionType || '').trim().toUpperCase(),
+      actionValue: couponCode || String(req.body.actionValue || '').trim(),
+      couponId: coupon?._id || null,
+      couponCode: couponCode || '',
+      appliesToAllOutlets,
+      outletIds: appliesToAllOutlets ? [] : outletIds,
+      startAt,
+      endAt,
+      active: bool(req.body.enabled ?? req.body.active, true),
+      sortOrder: Math.max(0, Number(req.body.priority ?? req.body.sortOrder ?? 0) || 0),
+    },
+    uploaded,
   };
 }
 
 async function couponPayload(body) {
   const outletIds = array(body.outletIds ?? body.outlet_ids);
   const appliesToAllOutlets = bool(body.appliesToAllOutlets ?? body.applies_to_all_outlets, outletIds.length === 0);
-  await validateScope(outletIds, appliesToAllOutlets);
+  const resolvedOutletIds = await validateScope(outletIds, appliesToAllOutlets);
   const startAt = date(body.startsAt ?? body.startAt ?? body.validFrom);
   const endAt = date(body.expiresAt ?? body.endsAt ?? body.endAt ?? body.validTo);
   if (startAt && endAt && startAt >= endAt) throw new AppError('Coupon expiry must be after its start time', 400, 'INVALID_DATE_RANGE');
@@ -183,7 +198,7 @@ async function couponPayload(body) {
     startAt, endAt,
     active: bool(body.enabled ?? body.active, true),
     appliesToAllOutlets,
-    outletIds: appliesToAllOutlets ? [] : outletIds,
+    outletIds: appliesToAllOutlets ? [] : resolvedOutletIds,
     productIds: array(body.productIds),
     paymentMethods: array(body.paymentMethods).map((x) => x.toUpperCase()),
     fulfilmentTypes: array(body.fulfilmentTypes).map((x) => x.toUpperCase()),
@@ -203,21 +218,35 @@ router.get('/admin/banners', ah(async (req, res) => {
   ok(res, pageOut(rows.map((row) => bannerOut(row, couponMap.get(String(row.couponCode || row.actionValue || '').toUpperCase()))), total, page, perPage));
 }));
 
-router.post('/admin/banners', upload.single('imageFile'), ah(async (req, res) => {
-  const payload = await bannerPayload(req);
-  if (!payload.title) throw new AppError('Banner title is required', 400, 'BANNER_TITLE_REQUIRED');
-  if (!payload.image?.url) throw new AppError('Banner image is required', 400, 'BANNER_IMAGE_REQUIRED');
-  const row = await Banner.create(payload);
-  await row.populate('outletIds', 'name code slug');
-  ok(res, bannerOut(row, payload.couponCode ? await Coupon.findOne({ code: payload.couponCode }).lean() : null), 'Banner created', 201);
+router.post('/admin/banners', media.imageUpload.single('imageFile'), ah(async (req, res) => {
+  const { payload, uploaded } = await bannerPayload(req);
+  if (!payload.image?.url) {
+    if (uploaded?.publicId) await media.deleteImage(uploaded.publicId);
+    throw new AppError('Banner image is required', 400, 'BANNER_IMAGE_REQUIRED');
+  }
+  try {
+    const row = await Banner.create(payload);
+    await row.populate('outletIds', 'name code slug');
+    ok(res, bannerOut(row, payload.couponCode ? await Coupon.findOne({ code: payload.couponCode }).lean() : null), 'Banner created', 201);
+  } catch (error) {
+    if (uploaded?.publicId) await media.deleteImage(uploaded.publicId);
+    throw error;
+  }
 }));
 
-router.put('/admin/banners/:id', upload.single('imageFile'), ah(async (req, res) => {
+router.put('/admin/banners/:id', media.imageUpload.single('imageFile'), ah(async (req, res) => {
   const existing = await Banner.findById(req.params.id);
   if (!existing) throw new AppError('Banner not found', 404, 'BANNER_NOT_FOUND');
-  const payload = await bannerPayload(req, existing);
-  const row = await Banner.findByIdAndUpdate(req.params.id, { $set: payload }, { new: true, runValidators: true }).populate('outletIds', 'name code slug');
-  ok(res, bannerOut(row, payload.couponCode ? await Coupon.findOne({ code: payload.couponCode }).lean() : null), 'Banner updated');
+  const previousPublicId = existing.image?.publicId || '';
+  const { payload, uploaded } = await bannerPayload(req, existing);
+  try {
+    const row = await Banner.findByIdAndUpdate(req.params.id, { $set: payload }, { new: true, runValidators: true }).populate('outletIds', 'name code slug');
+    if (uploaded?.publicId && previousPublicId && previousPublicId !== uploaded.publicId) await media.deleteImage(previousPublicId);
+    ok(res, bannerOut(row, payload.couponCode ? await Coupon.findOne({ code: payload.couponCode }).lean() : null), 'Banner updated');
+  } catch (error) {
+    if (uploaded?.publicId) await media.deleteImage(uploaded.publicId);
+    throw error;
+  }
 }));
 
 router.patch('/admin/banners/:id/status', ah(async (req, res) => {
@@ -229,6 +258,7 @@ router.patch('/admin/banners/:id/status', ah(async (req, res) => {
 router.delete('/admin/banners/:id', ah(async (req, res) => {
   const row = await Banner.findByIdAndDelete(req.params.id);
   if (!row) throw new AppError('Banner not found', 404, 'BANNER_NOT_FOUND');
+  if (row.image?.publicId) await media.deleteImage(row.image.publicId);
   ok(res, null, 'Banner deleted');
 }));
 

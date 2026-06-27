@@ -67,6 +67,9 @@ async function requireAuth(req, res, next) {
 
     const user = await User.findById(userId).lean();
     if (!user || !user.active) throw new AppError('Invalid account', 401, 'UNAUTHENTICATED');
+    if (user.passwordChangedAt && Number(payload.iat || 0) * 1000 < new Date(user.passwordChangedAt).getTime()) {
+      throw new AppError('Your password changed. Please sign in again.', 401, 'TOKEN_REVOKED');
+    }
 
     const role = await resolveEffectiveRole(user);
     req.user = { ...user, id: String(user._id), role };
