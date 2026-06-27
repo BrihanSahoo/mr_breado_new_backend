@@ -89,7 +89,7 @@ async function repairCurrentSellerAssignment(req) {
 }
 
 async function currentOutlet(req) {
-  const requested = req.query.outletId || req.body?.outletId || req.body?.restaurantId;
+  const requested = req.query.outletId || req.query.outlet_id || req.headers['x-outlet-id'] || req.body?.outletId || req.body?.outlet_id || req.body?.restaurantId;
 
   if (req.user.role === 'ADMIN') {
     if (!requested) {

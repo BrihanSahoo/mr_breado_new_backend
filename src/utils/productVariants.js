@@ -60,20 +60,48 @@ function buildVariantFields(body, category) {
     };
   }
   if (kind === 'CAKE') {
+    const cakeMessageEnabled = b(body.cakeMessageEnabled ?? body.cake_message_enabled, false);
+    const cakeMessageCharge = n(body.cakeMessageCharge ?? body.cake_message_charge, 0);
+    const customWeightEnabled = b(body.customWeightEnabled ?? body.custom_weight_enabled, false);
+    const customWeightOptions = customWeightEnabled
+      ? parseCustomWeights(body.customWeightOptions ?? body.custom_weight_options)
+          .filter((row) => row.active !== false)
+          .sort((a, b) => Number(a.grams || 0) - Number(b.grams || 0))
+      : [];
+
+    if (customWeightEnabled) {
+      if (!customWeightOptions.length) {
+        throw new AppError('Add at least one custom cake weight', 400, 'CUSTOM_CAKE_WEIGHT_REQUIRED');
+      }
+      const base = Number(customWeightOptions[0].price || 0);
+      if (base <= 0) throw new AppError('Custom cake price must be greater than zero', 400, 'INVALID_CUSTOM_CAKE_PRICE');
+      const groups = [{
+        name: 'Cake Weight', type: 'SINGLE', required: true, minSelect: 1, maxSelect: 1,
+        options: customWeightOptions.map((row, index) => option(row.label, row.price, base, index === 0)),
+      }];
+      if (cakeMessageEnabled) groups.push({
+        name: 'Cake Message', type: 'SINGLE', required: false, minSelect: 0, maxSelect: 1,
+        options: [{ name: 'Add message on cake', price: cakeMessageCharge, active: true, default: false }],
+      });
+      return {
+        variantType: 'CAKE', defaultVariant: String(customWeightOptions[0].label || '').trim(), basePrice: base,
+        offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
+        weightPrices: undefined, sizePrices: undefined,
+        cakeMessageEnabled, cakeMessageCharge,
+        customWeightEnabled: true, customWeightOptions,
+        customizationGroups: groups,
+      };
+    }
+
     const gm500 = n(body.cake500gmPrice ?? body.cake_500gm_price ?? body.cake500gmExtra ?? body.basePrice ?? body.price);
     const kg1 = n(body.cake1kgPrice ?? body.cake_1kg_price ?? body.cake1kgExtra, gm500);
     const kg15 = n(body.cake15kgPrice ?? body.cake_1_5kg_price ?? body.cake15kgExtra, kg1);
     const kg2 = n(body.cake2kgPrice ?? body.cake_2kg_price ?? body.cake2kgExtra, kg15);
     if (gm500 <= 0) throw new AppError('500gm cake price must be greater than zero', 400, 'INVALID_CAKE_PRICE');
-    const cakeMessageEnabled = b(body.cakeMessageEnabled ?? body.cake_message_enabled, false);
-    const cakeMessageCharge = n(body.cakeMessageCharge ?? body.cake_message_charge, 0);
-    const customWeightEnabled = b(body.customWeightEnabled ?? body.custom_weight_enabled, false);
-    const customWeightOptions = customWeightEnabled ? parseCustomWeights(body.customWeightOptions ?? body.custom_weight_options) : [];
     const groups = [{
       name: 'Cake Weight', type: 'SINGLE', required: true, minSelect: 1, maxSelect: 1,
       options: [
         option('500 gm', gm500, gm500, true), option('1 kg', kg1, gm500), option('1.5 kg', kg15, gm500), option('2 kg', kg2, gm500),
-        ...customWeightOptions.filter((x) => x.active).map((x) => option(x.label, x.price, gm500)),
       ],
     }];
     if (cakeMessageEnabled) groups.push({
@@ -85,7 +113,7 @@ function buildVariantFields(body, category) {
       offerPrice: n(body.offerPrice ?? body.discountPrice ?? body.discount_price, 0),
       weightPrices: { gm500, kg1, kg15, kg2 }, sizePrices: undefined,
       cakeMessageEnabled, cakeMessageCharge,
-      customWeightEnabled, customWeightOptions,
+      customWeightEnabled: false, customWeightOptions: [],
       customizationGroups: groups,
     };
   }
