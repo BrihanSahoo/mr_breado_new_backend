@@ -197,8 +197,17 @@ r.patch(['/seller/restaurant/status','/outlet-manager/outlet/status','/seller/ou
   const open = Boolean(req.body.open ?? req.body.is_open ?? req.body.isOpen);
   if(!open) throw new AppError('Submit the daily sales report before closing the outlet.',409,'DAILY_REPORT_REQUIRED');
   const outlet=await requireBusinessReady(id);
-  const updated=await Outlet.findByIdAndUpdate(id, { $set: { open:true } }, { new: true });
   const rows=await OutletProduct.find({outletId:id,enabled:true}).populate('productId').lean();
+  if(!rows.length){
+    throw new AppError('No foods are assigned to this outlet. Ask the administrator to assign global foods first.',409,'OUTLET_MENU_EMPTY');
+  }
+  const pendingInitial=rows.filter(x=>!x.stockInitialized);
+  if(pendingInitial.length){
+    throw new AppError('Submit opening stock for every assigned food before opening the outlet.',409,'INITIAL_STOCK_REQUIRED',{
+      products:pendingInitial.map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item'}))
+    });
+  }
+  const updated=await Outlet.findByIdAndUpdate(id, { $set: { open:true } }, { new: true });
   const alerts=rows.filter(x=>Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))<Number(x.lowStockThreshold||5)).map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item',availableStock:Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0)),threshold:Number(x.lowStockThreshold||5)}));
   ok(res,{outlet:outletDto(updated),stockAlerts:alerts},alerts.length?'Outlet opened with low-stock alerts':'Outlet opened');
 }));
@@ -290,6 +299,41 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
 }));
 
 
+
+function startOfDay(date=new Date()){const d=new Date(date);d.setHours(0,0,0,0);return d;}
+function startOfWeek(date=new Date()){const d=startOfDay(date);const day=(d.getDay()+6)%7;d.setDate(d.getDate()-day);return d;}
+function startOfMonth(date=new Date()){const d=startOfDay(date);d.setDate(1);return d;}
+function sum(rows,field='total'){return rows.reduce((a,x)=>a+Number(x[field]||0),0);}
+function salesWindow(orders,offline,from){
+  const online=orders.filter(x=>new Date(x.createdAt)>=from&&['DELIVERED','COMPLETED'].includes(String(x.status).toUpperCase()));
+  const offlineRows=offline.filter(x=>new Date(x.createdAt)>=from);
+  return {onlineSales:sum(online),offlineSales:sum(offlineRows),totalSales:sum(online)+sum(offlineRows),onlineOrders:online.length,offlineOrders:offlineRows.length,totalOrders:online.length+offlineRows.length};
+}
+
+r.get(['/seller/business-summary','/outlet-manager/business-summary','/seller/dashboard-summary'],ah(async(req,res)=>{
+  const outletId=await currentOutlet(req);
+  const now=new Date();
+  const [outlet,orders,offline,inventory,closings,refunds]=await Promise.all([
+    Outlet.findById(outletId).lean(),
+    Order.find({outletId,createdAt:{$gte:startOfMonth(now)}}).populate('customerId riderId').sort({createdAt:-1}).lean(),
+    OfflineSale.find({outletId,createdAt:{$gte:startOfMonth(now)}}).sort({createdAt:-1}).lean(),
+    OutletProduct.find({outletId,enabled:true}).populate('productId').sort({updatedAt:-1}).lean(),
+    DailyClosing.find({outletId}).sort({businessDate:-1}).limit(31).lean(),
+    require('../models').Refund.find({outletId}).populate('customerId orderId').sort({createdAt:-1}).limit(100).lean(),
+  ]);
+  const today=salesWindow(orders,offline,startOfDay(now));
+  const week=salesWindow(orders,offline,startOfWeek(now));
+  const month=salesWindow(orders,offline,startOfMonth(now));
+  const rank=new Map();
+  const addItems=(rows,offlineMode=false)=>rows.forEach(row=>(row.items||[]).forEach(item=>{const key=String(item.productId?._id||item.productId||item.name);const old=rank.get(key)||{productId:key,name:item.name||item.productId?.name||'Food item',quantity:0,revenue:0};old.quantity+=Number(item.quantity||1);old.revenue+=Number(item.total??(Number(item.unitPrice||item.price||0)*Number(item.quantity||1)));rank.set(key,old);}));
+  addItems(orders);addItems(offline,true);
+  const topFoods=[...rank.values()].sort((a,b)=>b.quantity-a.quantity||b.revenue-a.revenue).slice(0,10);
+  const cancelled=orders.filter(x=>['CANCELLED','REJECTED'].includes(String(x.status).toUpperCase()));
+  const active=orders.filter(x=>!['DELIVERED','COMPLETED','CANCELLED','REJECTED'].includes(String(x.status).toUpperCase()));
+  const stock=inventory.map(productDto);
+  ok(res,{outlet:outletDto(outlet),today,week,month,topFoods,bestSellingFood:topFoods[0]||null,activeOrders:active.map(orderDto),recentOnlineOrders:orders.slice(0,50).map(orderDto),recentOfflineSales:offline.slice(0,50),cancelledOrders:cancelled.map(orderDto),refunds,inventory:stock,lowStock:stock.filter(x=>x.lowStock),outOfStock:stock.filter(x=>x.outOfStock),dailyReports:closings});
+}));
+
 r.get(['/seller/stock-summary','/outlet-manager/stock-summary','/seller/startup-stock'],ah(async(req,res)=>{const outletId=await currentOutlet(req);const rows=await OutletProduct.find({outletId,enabled:true}).populate('productId').sort({updatedAt:-1});const items=rows.map(productDto);ok(res,{items,total:items.length,needsInitialStock:items.some(x=>!x.stockInitialized),lowStockItems:items.filter(x=>x.lowStock),outOfStockItems:items.filter(x=>x.outOfStock)}); }));
 r.get(['/seller/orders','/outlet-manager/orders'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
@@ -343,7 +387,7 @@ r.post('/seller/orders/:id/invoice/send-to-customer', ah(async (req, res) => {
 }));
 
 
-r.post('/outlet-manager/offline-sales', ah(async (req, res) => {
+r.post(['/outlet-manager/offline-sales','/seller/offline-sales'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
   await requireBusinessReady(outletId);
   const key = req.headers['idempotency-key'] || req.body.idempotencyKey;
