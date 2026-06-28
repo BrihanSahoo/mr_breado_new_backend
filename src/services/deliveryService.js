@@ -109,13 +109,17 @@ async function checkServiceability({ latitude, longitude, pincode, address, city
   const outlets = await Outlet.find(query).lean();
   if (!outlets.length) return { ...coords, pincode:requestedPincode, serviceable:false, deliverable:false, canDeliver:false, code:'NO_ACTIVE_OUTLET', message:'No outlet is currently available near you.' };
 
-  const road = await googleRoadDistances(coords, outlets);
+  let road = new Map();
+  try { road = await googleRoadDistances(coords, outlets); } catch (_) { road = new Map(); }
   const ranked = outlets.map((outlet) => {
     const route = road.get(String(outlet._id));
+    const stored = storedOutletCoordinates(outlet);
+    const fallbackDistance = stored.valid ? Number(haversineKm(coords.latitude, coords.longitude, stored.latitude, stored.longitude).toFixed(2)) : null;
     const radius = Number(outlet.deliveryRadiusKm || 0);
-    const distanceKm = route?.distanceKm ?? null;
+    const distanceKm = route?.distanceKm ?? fallbackDistance;
     const serviceable = distanceKm != null && radius > 0 && distanceKm <= radius;
-    return { outlet, radius, distanceKm, durationMinutes: route?.durationMinutes ?? null, serviceable };
+    const durationMinutes = route?.durationMinutes ?? (distanceKm != null ? Math.max(1, Math.ceil(distanceKm / 18 * 60)) : null);
+    return { outlet, radius, distanceKm, durationMinutes, serviceable };
   }).sort((a,b) => (a.distanceKm ?? Number.MAX_SAFE_INTEGER) - (b.distanceKm ?? Number.MAX_SAFE_INTEGER));
 
   const best = ranked.find((x) => x.serviceable) || ranked[0];

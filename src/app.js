@@ -98,8 +98,8 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v87-strict-brand-product-assignment',
-  previousCompatibility: 'v80-rider-backend-admin-consistency',
+  apiCompatibility: 'v89-product-checkout-banner-pricing-consistency',
+  previousCompatibility: 'v87-strict-brand-product-assignment',
   compatibilityHistory: [
     'v79-outlet-stock-smtp-map-user-premium',
     'v78-customer-engagement-user-app-consistency',

@@ -163,7 +163,11 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
     const product = row.productId;
     const { price, selectedSize, selectedWeight } = choosePrice(product, row, input);
     const customizations = Array.isArray(input.customizations) ? input.customizations : [];
-    const addOnTotal = customizations.reduce((sum, option) => sum + Number(option.price || 0), 0);
+    const addOnTotal = customizations.reduce((sum, option) => {
+      const groupName = String(option.groupName || option.group || '').toLowerCase();
+      const isCoreVariant = /pizza\s*size|cake\s*weight|size|weight/.test(groupName);
+      return sum + (isCoreVariant ? 0 : Number(option.price || 0));
+    }, 0);
     const cakeMessage = String(input.cakeMessage || input.cake_message || '').trim();
     const cakeMessageCharge = product.variantType === 'CAKE' && cakeMessage && product.cakeMessageEnabled ? Number(product.cakeMessageCharge || 0) : 0;
     const finalTotal = Number(((price + addOnTotal + cakeMessageCharge) * quantity).toFixed(2));

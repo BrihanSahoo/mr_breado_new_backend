@@ -142,8 +142,24 @@ async function cartForUser(userId) {
   const items = (cart.items || []).map((item) => {
     const p = item.productId || {};
     const img = imageUrl(p.images);
-    const unitPrice = Number(p.offerPrice > 0 ? p.offerPrice : p.basePrice || 0);
-    const customizationTotal = (item.customizations || []).reduce((sum, c) => sum + Number(c.price || 0), 0);
+    const baseUnitPrice = Number(p.offerPrice > 0 ? p.offerPrice : p.basePrice || 0);
+    const selectedSize = String(item.selectedSize || '').trim().toLowerCase();
+    const selectedWeight = String(item.selectedWeight || '').trim().toLowerCase().replace(/\s+/g, '');
+    let unitPrice = baseUnitPrice;
+    if (p.variantType === 'PIZZA' && ['small','medium','large'].includes(selectedSize) && p.sizePrices?.[selectedSize] != null) unitPrice = Number(p.sizePrices[selectedSize]);
+    if (p.variantType === 'CAKE') {
+      if (p.customWeightEnabled) {
+        const custom = (p.customWeightOptions || []).find((row) => row.active !== false && String(row.label || '').trim().toLowerCase().replace(/\s+/g, '') === selectedWeight);
+        if (custom) unitPrice = Number(custom.price);
+      } else {
+        const weightKey = { '500gm':'gm500', '500g':'gm500', '1kg':'kg1', '1.5kg':'kg15', '2kg':'kg2' }[selectedWeight];
+        if (weightKey && p.weightPrices?.[weightKey] != null) unitPrice = Number(p.weightPrices[weightKey]);
+      }
+    }
+    const customizationTotal = (item.customizations || []).reduce((sum, c) => {
+      const groupName = String(c.groupName || '').toLowerCase();
+      return sum + (/pizza\s*size|cake\s*weight|size|weight/.test(groupName) ? 0 : Number(c.price || 0));
+    }, 0);
     const lineTotal = Number(((unitPrice + customizationTotal) * Number(item.quantity || 1)).toFixed(2));
     return {
       ...item,
@@ -429,7 +445,7 @@ async function checkoutContext(req) {
 }
 r.post('/checkout/summary', ah(async (req, res) => {
   const { cart, address } = await checkoutContext(req);
-  const pricing = await orderService.buildPricing({ outletId: cart.outletId, items: cart.items, address, fulfilmentType: req.body.orderType ?? req.body.order_type ?? req.body.fulfilmentType ?? 'DELIVERY', couponCode: req.body.promoCode ?? req.body.promo_code });
+  const pricing = await orderService.buildPricing({ outletId: cart.outletId, items: cart.items, address, fulfilmentType: req.body.orderType ?? req.body.order_type ?? req.body.fulfilmentType ?? 'DELIVERY', couponCode: req.body.promoCode ?? req.body.promo_code ?? req.body.couponCode ?? req.body.coupon_code, customerId: req.user.id, paymentMethod: req.body.paymentMethod ?? req.body.payment_method ?? 'COD' });
   ok(res, { ...pricing, items: pricing.snapshots, cart, restaurant: pricing.outlet, outlet: pricing.outlet });
 }));
 
