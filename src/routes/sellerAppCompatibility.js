@@ -202,15 +202,12 @@ r.patch(['/seller/restaurant/status','/outlet-manager/outlet/status','/seller/ou
     throw new AppError('No foods are assigned to this outlet. Ask the administrator to assign global foods first.',409,'OUTLET_MENU_EMPTY');
   }
   const pendingInitial=rows.filter(x=>!x.stockInitialized);
-  const confirmationAt=outlet.lastOpeningStockConfirmedAt ? new Date(outlet.lastOpeningStockConfirmedAt) : null;
-  const closedAt=outlet.lastClosedAt ? new Date(outlet.lastClosedAt) : null;
-  const openingStockIsFresh=confirmationAt && (!closedAt || confirmationAt > closedAt);
-  if(pendingInitial.length || !openingStockIsFresh){
-    throw new AppError('Confirm the current stock of every assigned food before opening this outlet.',409,'OPENING_STOCK_REQUIRED',{
-      products:rows.map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item',stockQuantity:Number(x.stockQuantity||0)}))
+  if(pendingInitial.length){
+    throw new AppError('Submit opening stock for every assigned food before opening the outlet.',409,'INITIAL_STOCK_REQUIRED',{
+      products:pendingInitial.map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item'}))
     });
   }
-  const updated=await Outlet.findByIdAndUpdate(id, { $set: { open:true,lastOpenedAt:new Date() } }, { new: true });
+  const updated=await Outlet.findByIdAndUpdate(id, { $set: { open:true } }, { new: true });
   const alerts=rows.filter(x=>Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0))<Number(x.lowStockThreshold||5)).map(x=>({productId:String(x.productId?._id||x.productId),name:x.productId?.name||'Food item',availableStock:Math.max(0,Number(x.stockQuantity||0)-Number(x.reservedQuantity||0)),threshold:Number(x.lowStockThreshold||5)}));
   ok(res,{outlet:outletDto(updated),stockAlerts:alerts},alerts.length?'Outlet opened with low-stock alerts':'Outlet opened');
 }));
@@ -265,31 +262,17 @@ r.post(['/outlet-manager/stock','/outlet-manager/daily-stock'], ah(async (req, r
   const outletId = await currentOutlet(req);
   await requireBusinessReady(outletId);
   if (Array.isArray(req.body.items) && req.body.items.length) {
-    const key=req.headers['idempotency-key']||req.body.idempotencyKey||`opening-stock:${outletId}:${Date.now()}`;
-    const session=await mongoose.startSession();
-    const results=[];
-    try{
-      await session.withTransaction(async()=>{
-        const assigned=await OutletProduct.find({outletId,enabled:true}).session(session);
-        const requested=new Map(req.body.items.map(x=>[String(x.productId||x.id),x]));
-        if(assigned.length!==requested.size) throw new AppError('Submit stock for every currently assigned food.',400,'ALL_STOCK_ITEMS_REQUIRED');
-        for(const row of assigned){
-          const item=requested.get(String(row.productId));
-          if(!item) throw new AppError('Submit stock for every currently assigned food.',400,'ALL_STOCK_ITEMS_REQUIRED');
-          const after=Number(item.stockQuantity??item.stock);
-          if(!Number.isInteger(after)||after<0) throw new AppError('Stock must be a whole number of zero or more.',400,'INVALID_STOCK');
-          const before=Number(row.stockQuantity||0);
-          row.stockQuantity=after; row.available=after>0; row.stockInitialized=true; row.lastStockUpdatedAt=new Date(); row.lastStockUpdatedBy=req.user.id;
-          if(item.lowStockThreshold!=null) row.lowStockThreshold=Math.max(0,Number(item.lowStockThreshold));
-          await row.save({session});
-          await InventoryMovement.create([{outletId,productId:row.productId,type:'OPENING_STOCK',quantityBefore:before,quantityChanged:after-before,quantityAfter:after,reservedBefore:row.reservedQuantity,reservedAfter:row.reservedQuantity,referenceType:'OUTLET_OPENING_STOCK',reason:req.body.note||'Opening stock confirmation',performedBy:req.user.id,idempotencyKey:`${key}:${row.productId}`}],{session});
-        }
-        await Outlet.updateOne({_id:outletId},{$set:{lastOpeningStockConfirmedAt:new Date(),lastOpeningStockConfirmedBy:req.user.id}},{session});
-      });
-      const populated=await OutletProduct.find({outletId,enabled:true}).populate('productId');
-      results.push(...populated.map(productDto));
-    }finally{await session.endSession();}
-    return ok(res,{items:results,products:results,confirmedAt:new Date().toISOString()},'Opening stock confirmed');
+    const results = [];
+    for (const item of req.body.items) {
+      const productId = await resolveObjectId(Product, item.productId);
+      if (!productId) throw new AppError('Product not found', 404);
+      const after = Number(item.stockQuantity ?? item.stock ?? 0);
+      if (!Number.isFinite(after) || after < 0) throw new AppError('Invalid stock quantity', 400);
+      const row = await OutletProduct.findOneAndUpdate({ outletId, productId }, { $set: { stockQuantity: after, available: after > 0, stockInitialized:true, lastStockUpdatedAt:new Date(), lastStockUpdatedBy:req.user.id } }, { new: true }).populate('productId');
+      if (!row) throw new AppError('Product is not assigned to this outlet', 404);
+      results.push(productDto(row));
+    }
+    return ok(res, { items: results, products: results }, 'Daily stock updated');
   }
   const productId = await resolveObjectId(Product, req.body.productId);
   if (!productId) throw new AppError('Product not found', 404);
@@ -406,8 +389,7 @@ r.post('/seller/orders/:id/invoice/send-to-customer', ah(async (req, res) => {
 
 r.post(['/outlet-manager/offline-sales','/seller/offline-sales'], ah(async (req, res) => {
   const outletId = await currentOutlet(req);
-  const outlet=await requireBusinessReady(outletId);
-  if(!outlet.open) throw new AppError('Open the outlet before recording an offline sale.',409,'OUTLET_CLOSED');
+  await requireBusinessReady(outletId);
   const key = req.headers['idempotency-key'] || req.body.idempotencyKey;
   if (!key) throw new AppError('Idempotency-Key is required', 400, 'IDEMPOTENCY_KEY_REQUIRED');
   const existing = await OfflineSale.findOne({ idempotencyKey: key });
@@ -428,9 +410,7 @@ r.post(['/outlet-manager/offline-sales','/seller/offline-sales'], ah(async (req,
         const row = await OutletProduct.findOne({ outletId, productId }).populate('productId').session(session);
         if (!row || row.stockQuantity < quantity) throw new AppError('Insufficient outlet stock', 409, 'INSUFFICIENT_STOCK');
         const before = row.stockQuantity;
-        const cataloguePrice=Number(row.offerPriceOverride ?? row.priceOverride ?? row.productId.offerPrice ?? row.productId.basePrice ?? 0);
-        const price=Number(item.unitPrice??cataloguePrice);
-        if(!Number.isFinite(price)||price<0) throw new AppError('Invalid unit price',400,'INVALID_UNIT_PRICE');
+        const price = Number(row.offerPriceOverride ?? row.priceOverride ?? row.productId.offerPrice ?? row.productId.basePrice ?? 0);
         row.stockQuantity -= quantity;
         await row.save({ session });
         const total = Number((price * quantity).toFixed(2));
@@ -438,11 +418,8 @@ r.post(['/outlet-manager/offline-sales','/seller/offline-sales'], ah(async (req,
         subtotal += total;
         await InventoryMovement.create([{ outletId, productId, type: 'OFFLINE_SALE', quantityBefore: before, quantityChanged: -quantity, quantityAfter: row.stockQuantity, reservedBefore: row.reservedQuantity, reservedAfter: row.reservedQuantity, referenceType: 'OFFLINE_SALE', reason: req.body.note || 'Seller offline sale', performedBy: req.user.id, idempotencyKey: `${key}:${productId}` }], { session });
       }
-      const tax=Number(req.body.tax||0);
-      if(!Number.isFinite(tax)||tax<0) throw new AppError('Invalid tax amount',400,'INVALID_TAX');
-      const paymentMode=String(req.body.paymentMode||'CASH').trim().toUpperCase();
-      if(!['CASH','UPI','CARD','OTHER'].includes(paymentMode)) throw new AppError('Payment mode must be CASH, UPI, CARD or OTHER',400,'INVALID_PAYMENT_MODE');
-      [sale]=await OfflineSale.create([{outletId,sellerId:req.user.id,items,subtotal:Number(subtotal.toFixed(2)),tax,total:Number((subtotal+tax).toFixed(2)),paymentMode,notes:req.body.notes||req.body.note||'',customerReference:req.body.customerReference||'',idempotencyKey:key}],{session});
+      const tax = Number(req.body.tax || 0);
+      [sale] = await OfflineSale.create([{ outletId, sellerId: req.user.id, items, subtotal: Number(subtotal.toFixed(2)), tax, total: Number((subtotal + tax).toFixed(2)), paymentMode: req.body.paymentMode || 'CASH', idempotencyKey: key }], { session });
     });
   } finally { await session.endSession(); }
   ok(res, sale, 'Offline sale recorded', 201);
@@ -511,7 +488,7 @@ r.post(['/outlet-manager/close-day','/outlet-manager/day-close','/outlet-manager
   const offlineCashSales=Number(req.body.offlineCashSales??req.body.cashSales??0),offlineUpiSales=Number(req.body.offlineUpiSales??req.body.upiSales??0),offlineCardSales=Number(req.body.offlineCardSales??req.body.cardSales??0),offlineOtherSales=Number(req.body.offlineOtherSales??req.body.otherSales??0);
   const offlineSales=Math.max(recordedOffline,Number(req.body.offlineSales||0),offlineCashSales+offlineUpiSales+offlineCardSales+offlineOtherSales);
   const session=await mongoose.startSession();let closing;
-  try{await session.withTransaction(async()=>{for(const snap of stockSnapshot){await OutletProduct.updateOne({outletId,productId:snap.productId},{$set:{stockQuantity:snap.stockQuantity,available:snap.availableStock>0,stockInitialized:true,lastStockUpdatedAt:new Date(),lastStockUpdatedBy:req.user.id}},{session});}closing=await DailyClosing.findOneAndUpdate({outletId,businessDate},{$set:{sellerId:req.user.id,stockSnapshot,onlineSales,codSales,offlineSales,offlineCashSales,offlineUpiSales,offlineCardSales,offlineOtherSales,offlineOrderCount:Number(req.body.offlineOrderCount||0),refunds:Number(req.body.refunds||0),expenses:Number(req.body.expenses||0),totalSales:onlineSales+codSales+offlineSales,status:'SUBMITTED',notes:req.body.notes||req.body.note||'',submittedAt:new Date()}},{upsert:true,new:true,runValidators:true,session,setDefaultsOnInsert:true});await Outlet.updateOne({_id:outletId},{$set:{open:false,lastClosedAt:new Date()}},{session});});}finally{await session.endSession();}
+  try{await session.withTransaction(async()=>{for(const snap of stockSnapshot){await OutletProduct.updateOne({outletId,productId:snap.productId},{$set:{stockQuantity:snap.stockQuantity,available:snap.availableStock>0,stockInitialized:true,lastStockUpdatedAt:new Date(),lastStockUpdatedBy:req.user.id}},{session});}closing=await DailyClosing.findOneAndUpdate({outletId,businessDate},{$set:{sellerId:req.user.id,stockSnapshot,onlineSales,codSales,offlineSales,offlineCashSales,offlineUpiSales,offlineCardSales,offlineOtherSales,offlineOrderCount:Number(req.body.offlineOrderCount||0),refunds:Number(req.body.refunds||0),expenses:Number(req.body.expenses||0),totalSales:onlineSales+codSales+offlineSales,status:'SUBMITTED',notes:req.body.notes||req.body.note||'',submittedAt:new Date()}},{upsert:true,new:true,runValidators:true,session,setDefaultsOnInsert:true});await Outlet.updateOne({_id:outletId},{$set:{open:false}},{session});});}finally{await session.endSession();}
   ok(res,{closing,outletOpen:false},'Daily sales report submitted and outlet closed');
 }));
 

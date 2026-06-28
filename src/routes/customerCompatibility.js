@@ -334,7 +334,14 @@ r.post('/user/addresses', ah(async (req, res) => {
   if (!user) throw new AppError('User not found', 404);
   const pincode=req.body.pincode ?? req.body.zipcode;
   const line1=req.body.line1 ?? req.body.address ?? req.body.addressLine ?? req.body.address_line;
-  const validation=await deliveryService.checkServiceability({latitude:req.body.latitude,longitude:req.body.longitude,pincode,address:line1,city:req.body.city,state:req.body.state});
+  const requestedOutletRef = req.body.outletId ?? req.body.outlet_id ?? req.body.restaurantId ?? req.body.restaurant_id;
+  const requestedOutlet = requestedOutletRef != null && String(requestedOutletRef).trim()
+    ? await findOneCompat(Outlet, requestedOutletRef)
+    : null;
+  if (requestedOutletRef != null && String(requestedOutletRef).trim() && !requestedOutlet) {
+    throw new AppError('Outlet not found', 404, 'OUTLET_NOT_FOUND');
+  }
+  const validation=await deliveryService.checkServiceability({outletId:requestedOutlet?._id,latitude:req.body.latitude,longitude:req.body.longitude,pincode,address:line1,city:req.body.city,state:req.body.state});
   if (req.body.isDefault ?? req.body.is_default) user.addresses.forEach((a) => { a.isDefault = false; });
   user.addresses.push({
     label: req.body.label ?? req.body.type, line1, line2: req.body.line2, area: req.body.area, city: req.body.city, state: req.body.state,
@@ -388,7 +395,23 @@ r.post('/cart/items', ah(async (req, res) => {
       if (matchesId || matchesLabel) selectedCustomizations.push({ groupName: group.name, optionName: option.name, price: Number(option.price || 0) });
     }
   }
-  if (selectedLabel && !selectedCustomizations.length) throw new AppError('Selected food size or weight is not available', 400, 'INVALID_VARIANT');
+  if (selectedLabel && !selectedCustomizations.length) {
+    const normalizedSelected = selectedLabel.toLowerCase().replace(/\s+/g, '');
+    const validCustomCakeWeight = product.variantType === 'CAKE' &&
+      product.customWeightEnabled === true &&
+      (product.customWeightOptions || []).some((row) =>
+        row.active !== false &&
+        String(row.label || row.name || '').trim().toLowerCase().replace(/\s+/g, '') === normalizedSelected
+      );
+    if (!validCustomCakeWeight) {
+      throw new AppError('Selected food size or weight is not available', 400, 'INVALID_VARIANT');
+    }
+    selectedCustomizations.push({
+      groupName: 'Cake Weight',
+      optionName: selectedWeight,
+      price: 0,
+    });
+  }
   const cakeMessage = text(req.body.cakeMessage ?? req.body.cake_message);
   if (cakeMessage && product.cakeMessageEnabled) selectedCustomizations.push({ groupName: 'Cake Message Text', optionName: cakeMessage, price: Number(product.cakeMessageCharge || 0) });
   const normalizeVariant = (value) => text(value).toLowerCase().replace(/\s+/g, '');
