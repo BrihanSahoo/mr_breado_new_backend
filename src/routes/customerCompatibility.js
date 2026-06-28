@@ -507,15 +507,36 @@ async function deliveryValidation(req, res) {
     outletId = requestedOutlet._id;
   }
 
-  const result = await deliveryService.checkServiceability({
-    outletId,
-    latitude: address ? address.latitude : readLat(source),
-    longitude: address ? address.longitude : readLng(source),
-    pincode: address?.pincode ?? source.pincode ?? source.zipcode,
-    address: address?.line1 ?? source.address,
-    city: address?.city ?? source.city,
-    state: address?.state ?? source.state,
-  });
+  const savedAddressMatchesCartOutlet = Boolean(
+    address &&
+    address.serviceable === true &&
+    address.nearestOutletId &&
+    outletId &&
+    String(address.nearestOutletId) === String(outletId) &&
+    Number.isFinite(Number(address.distanceKm))
+  );
+  const result = savedAddressMatchesCartOutlet
+    ? {
+        serviceable: true,
+        deliverable: true,
+        canDeliver: true,
+        code: 'OUTLET_AVAILABLE',
+        nearestOutletId: String(address.nearestOutletId),
+        distanceKm: Number(address.distanceKm || 0),
+        allowedRadiusKm: Number(address.allowedRadiusKm || 0),
+        deliveryRadiusKm: Number(address.allowedRadiusKm || 0),
+        pincode: address.pincode,
+        message: address.validationMessage || 'Delivery is available for this address.',
+      }
+    : await deliveryService.checkServiceability({
+        outletId,
+        latitude: address ? address.latitude : readLat(source),
+        longitude: address ? address.longitude : readLng(source),
+        pincode: address?.pincode ?? source.pincode ?? source.zipcode,
+        address: address?.line1 ?? source.address,
+        city: address?.city ?? source.city,
+        state: address?.state ?? source.state,
+      });
   ok(res, { ...result, outletId: result.nearestOutletId ?? (outletId ? String(outletId) : null) });
 }
 r.post(['/delivery/validate', '/orders/validate-delivery'], ah(deliveryValidation));

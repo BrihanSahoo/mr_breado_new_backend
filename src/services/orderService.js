@@ -186,7 +186,30 @@ async function buildPricing({ outletId, items, address, fulfilmentType = 'DELIVE
   let deliveryFee = 0;
   if (type === 'DELIVERY') {
     if (!address || address.latitude == null || address.longitude == null) throw new AppError('Current delivery latitude and longitude are required', 400, 'DELIVERY_LOCATION_REQUIRED');
-    const validation = await deliveryService.checkServiceability({ outletId, latitude: address.latitude, longitude: address.longitude, pincode: address.pincode || address.zipcode, address: address.line1 || address.address, city: address.city, state: address.state });
+    const previouslyValidatedForOutlet = Boolean(
+      address.serviceable === true &&
+      address.nearestOutletId &&
+      String(address.nearestOutletId) === String(outletId) &&
+      Number.isFinite(Number(address.distanceKm))
+    );
+    const validation = previouslyValidatedForOutlet
+      ? {
+          serviceable: true,
+          deliverable: true,
+          canDeliver: true,
+          distanceKm: Number(address.distanceKm || 0),
+          nearestOutletId: String(address.nearestOutletId),
+          message: address.validationMessage || 'Delivery is available for this address.',
+        }
+      : await deliveryService.checkServiceability({
+          outletId,
+          latitude: address.latitude,
+          longitude: address.longitude,
+          pincode: address.pincode || address.zipcode,
+          address: address.line1 || address.address,
+          city: address.city,
+          state: address.state,
+        });
     if (!validation.serviceable) throw new AppError(validation.message || 'This outlet is outside your delivery range', 409, validation.code || 'OUT_OF_RANGE');
     distanceKm = Number(validation.distanceKm || 0);
     const deliveryPricing = await settings.getDeliveryPricing();
