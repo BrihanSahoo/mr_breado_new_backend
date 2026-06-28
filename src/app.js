@@ -42,7 +42,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Accept', 'Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id'],
+  allowedHeaders: ['Accept', 'Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id', 'Idempotency-Key'],
   exposedHeaders: ['X-Request-Id', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'],
   maxAge: 86400,
 }));
@@ -98,7 +98,7 @@ app.get(`${env.apiPrefix}/ready`, async (req, res) => {
 app.get(`${env.apiPrefix}/version`, (req, res) => res.json({
   success: true,
   version: 'mongodb-v1',
-  apiCompatibility: 'v89-product-checkout-banner-pricing-consistency',
+  apiCompatibility: 'v90-outlet-enterprise-stock-offline-sales-reporting',
   previousCompatibility: 'v87-strict-brand-product-assignment',
   compatibilityHistory: [
     'v79-outlet-stock-smtp-map-user-premium',
