@@ -436,6 +436,18 @@ r.delete(['/cart', '/cart/clear'], ah(async (req, res) => { await Cart.deleteMan
 async function checkoutContext(req) {
   const cart = await Cart.findOne({ customerId: req.user.id });
   if (!cart?.items?.length) throw new AppError('Cart is empty', 400);
+
+  // The cart is the source of truth for outlet ownership. A client may send an
+  // old/current-outlet value from another screen, but an order must never be
+  // priced or created for a different outlet than the cart inventory.
+  const requestedOutletRef = req.body.outletId ?? req.body.outlet_id ?? req.body.restaurantId ?? req.body.restaurant_id;
+  if (requestedOutletRef != null && String(requestedOutletRef).trim()) {
+    const requestedOutlet = await findOneCompat(Outlet, requestedOutletRef);
+    if (!requestedOutlet || String(requestedOutlet._id) !== String(cart.outletId)) {
+      throw new AppError('Your cart belongs to another outlet. Please refresh the cart and try again.', 409, 'CART_OUTLET_MISMATCH');
+    }
+  }
+
   const addressId = req.body.addressId ?? req.body.address_id;
   let address = null;
   if (String(req.body.orderType ?? req.body.order_type ?? req.body.fulfilmentType ?? 'DELIVERY').toUpperCase() !== 'TAKEAWAY') {
@@ -453,13 +465,35 @@ async function deliveryValidation(req, res) {
   const source = { ...req.query, ...req.body };
   const cart = await Cart.findOne({ customerId: req.user.id });
   let address = null;
-  if (source.addressId ?? source.address_id) address = (await addressForUser(req.user.id, source.addressId ?? source.address_id)).address;
-  const result=await deliveryService.checkServiceability({
-    outletId: source.outletId ?? source.restaurantId ?? cart?.outletId,
-    latitude: readLat(source) ?? address?.latitude, longitude: readLng(source) ?? address?.longitude,
-    pincode: source.pincode ?? source.zipcode ?? address?.pincode, address: source.address ?? address?.line1, city:source.city ?? address?.city, state:source.state ?? address?.state
+  const addressRef = source.addressId ?? source.address_id;
+  if (addressRef != null && String(addressRef).trim()) {
+    address = (await addressForUser(req.user.id, addressRef)).address;
+  }
+
+  // When a saved address is selected it is authoritative. Device GPS describes
+  // where the phone currently is, not necessarily where the customer wants the
+  // order delivered, and must not override the selected delivery address.
+  const requestedOutletRef = source.outletId ?? source.outlet_id ?? source.restaurantId ?? source.restaurant_id;
+  let outletId = cart?.outletId || null;
+  if (requestedOutletRef != null && String(requestedOutletRef).trim()) {
+    const requestedOutlet = await findOneCompat(Outlet, requestedOutletRef);
+    if (!requestedOutlet) throw new AppError('Outlet not found', 404, 'OUTLET_NOT_FOUND');
+    if (cart?.outletId && String(requestedOutlet._id) !== String(cart.outletId)) {
+      throw new AppError('Your cart belongs to another outlet. Please refresh the cart and try again.', 409, 'CART_OUTLET_MISMATCH');
+    }
+    outletId = requestedOutlet._id;
+  }
+
+  const result = await deliveryService.checkServiceability({
+    outletId,
+    latitude: address ? address.latitude : readLat(source),
+    longitude: address ? address.longitude : readLng(source),
+    pincode: address?.pincode ?? source.pincode ?? source.zipcode,
+    address: address?.line1 ?? source.address,
+    city: address?.city ?? source.city,
+    state: address?.state ?? source.state,
   });
-  ok(res,result);
+  ok(res, { ...result, outletId: result.nearestOutletId ?? (outletId ? String(outletId) : null) });
 }
 r.post(['/delivery/validate', '/orders/validate-delivery'], ah(deliveryValidation));
 
