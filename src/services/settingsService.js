@@ -189,8 +189,9 @@ async function publicSettings() {
   data.riderPayPerKm = deliveryPricing.rider.perKmRate;
   data.minimumRiderDeliveryPay = deliveryPricing.rider.minimumDeliveryPay;
   const onlineEnabled = data.feature_toggles.onlinePayment && razorpay.enabled !== false;
-  data.payment = { ...(data.payment||{}), onlinePaymentEnabled:onlineEnabled, onlinePaymentConfigured:Boolean(razorpay.keyId && razorpay.keySecret), razorpayKeyId:onlineEnabled ? razorpay.keyId : '' };
+  data.payment = { ...(data.payment||{}), onlinePaymentEnabled:onlineEnabled, onlinePaymentConfigured:Boolean(razorpay.keyId && razorpay.keySecret), razorpayKeyId:onlineEnabled ? razorpay.keyId : '', razorpayMode:razorpay.mode || (String(razorpay.keyId||'').startsWith('rzp_live_') ? 'LIVE' : 'TEST') };
   data.razorpayKeyId = onlineEnabled ? razorpay.keyId : '';
+  data.razorpayMode = data.payment.razorpayMode;
   data.takeawayEnabled = data.feature_toggles.takeaway;
   data.takeawayAdvancePercentage = data.takeaway.advanceValue;
   data.googleMapsApiKey = maps.enabled ? maps.apiKey : '';
@@ -229,9 +230,15 @@ async function setSecret(key, value, userId, options={}) {
 async function getRazorpayConfig(requireEnabled=true) {
   const row = await Setting.findOne({key:'razorpay_credentials',active:true}).lean();
   const dynamic = row ? decrypt(row) : null;
-  const cfg = dynamic || {keyId:env.razorpay.keyId,keySecret:env.razorpay.keySecret,webhookSecret:env.razorpay.webhookSecret,enabled:true};
-  if (requireEnabled && cfg.enabled === false) throw new AppError('Online payment is disabled',503,'PAYMENT_DISABLED');
-  return cfg;
+  const raw = dynamic || {keyId:env.razorpay.keyId,keySecret:env.razorpay.keySecret,webhookSecret:env.razorpay.webhookSecret,enabled:true};
+  if (requireEnabled && raw.enabled === false) throw new AppError('Online payment is disabled',503,'PAYMENT_DISABLED');
+  const requestedMode = String(raw.mode || raw.activeMode || '').toUpperCase();
+  const inferredMode = String(raw.liveKeyId || raw.keyId || '').startsWith('rzp_live_') ? 'LIVE' : 'TEST';
+  const mode = requestedMode === 'LIVE' ? 'LIVE' : (requestedMode === 'TEST' ? 'TEST' : inferredMode);
+  const selected = mode === 'LIVE'
+    ? { keyId: raw.liveKeyId || (String(raw.keyId||'').startsWith('rzp_live_') ? raw.keyId : ''), keySecret: raw.liveKeySecret || (String(raw.keyId||'').startsWith('rzp_live_') ? raw.keySecret : ''), webhookSecret: raw.liveWebhookSecret || raw.webhookSecret }
+    : { keyId: raw.testKeyId || (String(raw.keyId||'').startsWith('rzp_test_') ? raw.keyId : ''), keySecret: raw.testKeySecret || (String(raw.keyId||'').startsWith('rzp_test_') ? raw.keySecret : ''), webhookSecret: raw.testWebhookSecret || raw.webhookSecret };
+  return { ...raw, ...selected, mode, enabled: raw.enabled !== false };
 }
 async function getGoogleMapsConfig(requireEnabled=true) {
   const row = await Setting.findOne({key:'google_maps_credentials',active:true}).lean();

@@ -37,7 +37,9 @@ async function createOrder({ orderId, userId, idempotencyKey }) {
   }
 
   const { instance, cfg } = await client();
-  const old = existingByKey || await Payment.findOne({ orderId: order._id, status: { $in: ['PENDING', 'SUCCESS', 'CAPTURED', 'PAID'] } }).sort({ createdAt: -1 });
+  const old = (existingByKey && !['FAILED','CANCELLED'].includes(String(existingByKey.status||'').toUpperCase()))
+    ? existingByKey
+    : await Payment.findOne({ orderId: order._id, status: { $in: ['PENDING', 'SUCCESS', 'CAPTURED', 'PAID'] } }).sort({ createdAt: -1 });
   if (old?.gatewayOrderId) {
     return {
       keyId: cfg.keyId,
@@ -143,7 +145,9 @@ async function applySuccessfulPayment(payment, gatewayPaymentId, signature, rawM
 }
 
 async function verify(body, user) {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = body;
+  const razorpay_order_id = body.razorpay_order_id || body.razorpayOrderId || body.provider_order_id || body.providerOrderId;
+  const razorpay_payment_id = body.razorpay_payment_id || body.razorpayPaymentId || body.provider_payment_id || body.providerPaymentId;
+  const razorpay_signature = body.razorpay_signature || body.razorpaySignature || body.provider_signature || body.providerSignature;
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) throw new AppError('Incomplete payment verification payload', 400);
   const payment = await Payment.findOne({ gatewayOrderId: razorpay_order_id, customerId: user.id });
   if (!payment) throw new AppError('Payment transaction not found', 404);
@@ -167,6 +171,19 @@ async function verify(body, user) {
     await session.endSession();
   }
   return Payment.findById(payment._id);
+}
+
+async function markFailed(body, user) {
+  const gatewayOrderId = body.razorpay_order_id || body.razorpayOrderId || body.providerOrderId;
+  if (!gatewayOrderId) throw new AppError('Payment order reference is required', 400, 'PAYMENT_ORDER_REQUIRED');
+  const payment = await Payment.findOne({ gatewayOrderId, customerId: user.id });
+  if (!payment) throw new AppError('Payment transaction not found', 404, 'PAYMENT_NOT_FOUND');
+  if (payment.status === 'SUCCESS') return payment;
+  payment.status = 'FAILED';
+  payment.failureReason = String(body.reason || body.message || 'Payment failed or was cancelled').slice(0, 500);
+  payment.rawMetadata = { ...(payment.rawMetadata || {}), clientFailureCode: body.code, failedAt: new Date().toISOString() };
+  await payment.save();
+  return payment;
 }
 
 async function webhook(raw, signature, eventIdHeader) {
@@ -228,4 +245,4 @@ async function webhook(raw, signature, eventIdHeader) {
   }
 }
 
-module.exports = { createOrder, verify, webhook, applySuccessfulPayment };
+module.exports = { createOrder, verify, markFailed, webhook, applySuccessfulPayment };

@@ -518,6 +518,7 @@ r.post(['/payments/create-order', '/payment/create-order', '/razorpay/create-ord
   ok(res, { ...data, appOrderId: order.legacyId, orderId: order.legacyId, orderSlug: order.slug });
 }));
 r.post(['/payments/verify', '/payment/verify', '/razorpay/verify', '/payments/razorpay/verify', '/checkout/razorpay/verify', '/checkout/payment/verify'], ah(async (req, res) => ok(res, await paymentService.verify(req.body, req.user), 'Payment verified')));
+r.post(['/payments/failed','/razorpay/failed','/checkout/payment/failed'], ah(async(req,res)=>ok(res,await paymentService.markFailed(req.body,req.user),'Payment failure recorded')));
 
 r.post('/user/orders', ah(async (req, res) => {
   const gatewayOrderId = req.body.razorpayOrderId ?? req.body.razorpay_order_id;
@@ -682,7 +683,10 @@ r.patch('/notifications/:id/read', ah(async (req, res) => {
 }));
 r.patch('/notifications/read-all', ah(async (req, res) => { await Notification.updateMany({ userId: req.user.id }, { read: true }); ok(res, null, 'Notifications marked read'); }));
 
-r.get('/user/payments', ah(async (req, res) => ok(res, await Payment.find({ customerId: req.user.id }).populate('orderId outletId').sort({ createdAt: -1 }).lean())));
+r.get('/user/payments', ah(async (req, res) => {
+  const rows=await Payment.find({ customerId:req.user.id }).populate('orderId customerId outletId').sort({createdAt:-1}).lean();
+  ok(res,rows.map((p)=>{const o=p.orderId||{},u=p.customerId||{},out=p.outletId||{};return {id:String(p._id),gateway:p.gateway||'RAZORPAY',status:p.status,amount:p.amount,currency:p.currency,createdAt:p.createdAt,paidAt:p.updatedAt,razorpayOrderId:p.gatewayOrderId,razorpayPaymentId:p.gatewayPaymentId,orderId:o._id?String(o._id):String(p.orderId||''),orderNumber:o.slug||'',orderSlug:o.slug||'',customerName:u.name||o.address?.name||'',customerPhone:u.phone||o.address?.phone||'',customerEmail:u.email||'',restaurantName:out.name||'',outletName:out.name||'',outletId:out._id?String(out._id):String(p.outletId||''),sellerId:out.sellerId||'',items:o.items||[],subtotal:o.subtotal||0,tax:o.tax||0,deliveryCharge:o.deliveryCharge||0,discount:o.discount||0,total:o.total||p.amount,paymentStatus:o.paymentStatus||p.status,fulfilmentType:o.fulfilmentType||'DELIVERY',failureReason:p.failureReason||'',receiptUrl:`/user/payments/${p._id}/receipt.pdf`};}));
+}));
 r.get(['/user/payments/:id/receipt', '/user/payments/:id/receipt.pdf'], ah(async (req, res) => {
   const payment = await findOneCompat(Payment, req.params.id, { customerId: req.user.id });
   if (!payment) throw new AppError('Payment not found', 404);

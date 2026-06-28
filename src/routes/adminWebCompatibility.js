@@ -438,18 +438,35 @@ r.put(['/admin/delivery-pricing','/admin/delivery-charges'], ah(async(req,res)=>
   ok(res,{...pricing,baseDeliveryCharge:pricing.customer.baseCharge,deliveryChargePerKm:pricing.customer.perKmCharge,minimumDeliveryCharge:pricing.customer.minimumCharge,maximumDeliveryCharge:pricing.customer.maximumCharge,riderBasePay:pricing.rider.basePay,riderPayPerKm:pricing.rider.perKmRate,minimumRiderDeliveryPay:pricing.rider.minimumDeliveryPay,assignmentRadiusKm:pricing.rider.assignmentRadiusKm,monthlySettlementDay:pricing.rider.monthlySettlementDay},'Delivery pricing saved');
 }));
 r.put('/admin/payment-controls', ah(async(req,res)=>{
-  await settings.setBusinessFeatures({onlinePaymentEnabled:req.body.onlinePaymentEnabled,takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,feature_toggles:{cod:req.body.codEnabled!==false}},req.user.id,{requestId:req.id});
+  await settings.setBusinessFeatures({
+    onlinePaymentEnabled:req.body.onlinePaymentEnabled,
+    takeawayEnabled:req.body.mrBreadoTakeawayEnabled??req.body.takeawayEnabled,
+    takeawayAdvancePercentage:req.body.takeawayAdvancePercentage??0,
+    feature_toggles:{cod:req.body.codEnabled!==false},
+  },req.user.id,{requestId:req.id});
+
   const current=await settings.getRazorpayConfig(false);
-  const suppliedKeyId=String(req.body.razorpayKeyId||'').trim();
-  const keyId=suppliedKeyId.includes('*')?current.keyId:suppliedKeyId||current.keyId;
-  const keySecret=String(req.body.razorpayKeySecret||'').trim()||current.keySecret;
-  const webhookSecret=String(req.body.razorpayWebhookSecret||'').trim()||current.webhookSecret;
-  if(req.body.onlinePaymentEnabled!==false){
-    if(!/^rzp_(test|live)_[A-Za-z0-9]+$/.test(String(keyId||''))) throw new AppError('Enter a valid Razorpay Key ID',400,'INVALID_RAZORPAY_KEY_ID');
-    if(!keySecret) throw new AppError('Razorpay Secret Key is required',400,'INVALID_RAZORPAY_SECRET');
+  const mode=String(req.body.razorpayMode||req.body.mode||current.mode||'TEST').toUpperCase()==='LIVE'?'LIVE':'TEST';
+  const preserve=(next,old)=>{const v=String(next||'').trim();return !v||v.includes('*')?old:v;};
+  const credentials={
+    enabled:req.body.onlinePaymentEnabled!==false,
+    mode,
+    testKeyId:preserve(req.body.razorpayTestKeyId??(mode==='TEST'?req.body.razorpayKeyId:null),current.testKeyId||(current.mode==='TEST'?current.keyId:'')),
+    testKeySecret:preserve(req.body.razorpayTestKeySecret??(mode==='TEST'?req.body.razorpayKeySecret:null),current.testKeySecret||(current.mode==='TEST'?current.keySecret:'')),
+    testWebhookSecret:preserve(req.body.razorpayTestWebhookSecret??(mode==='TEST'?req.body.razorpayWebhookSecret:null),current.testWebhookSecret||(current.mode==='TEST'?current.webhookSecret:'')),
+    liveKeyId:preserve(req.body.razorpayLiveKeyId??(mode==='LIVE'?req.body.razorpayKeyId:null),current.liveKeyId||(current.mode==='LIVE'?current.keyId:'')),
+    liveKeySecret:preserve(req.body.razorpayLiveKeySecret??(mode==='LIVE'?req.body.razorpayKeySecret:null),current.liveKeySecret||(current.mode==='LIVE'?current.keySecret:'')),
+    liveWebhookSecret:preserve(req.body.razorpayLiveWebhookSecret??(mode==='LIVE'?req.body.razorpayWebhookSecret:null),current.liveWebhookSecret||(current.mode==='LIVE'?current.webhookSecret:'')),
+  };
+  const activeKeyId=mode==='LIVE'?credentials.liveKeyId:credentials.testKeyId;
+  const activeSecret=mode==='LIVE'?credentials.liveKeySecret:credentials.testKeySecret;
+  if(credentials.enabled){
+    const expectedPrefix=mode==='LIVE'?'rzp_live_':'rzp_test_';
+    if(!String(activeKeyId||'').startsWith(expectedPrefix)) throw new AppError(`Enter a valid ${mode.toLowerCase()} Razorpay Key ID`,400,'INVALID_RAZORPAY_KEY_ID');
+    if(!activeSecret) throw new AppError(`${mode} Razorpay Secret Key is required`,400,'INVALID_RAZORPAY_SECRET');
   }
-  await settings.setSecret('razorpay_credentials',{keyId,keySecret,webhookSecret,enabled:req.body.onlinePaymentEnabled!==false},req.user.id,{requestId:req.id});
-  ok(res,{...(await settings.getBusinessFeatures()),razorpayKeyId:keyId,razorpaySecretConfigured:Boolean(keySecret),razorpayWebhookSecretConfigured:Boolean(webhookSecret)},'Payment controls saved');
+  await settings.setSecret('razorpay_credentials',credentials,req.user.id,{requestId:req.id});
+  ok(res,{...(await settings.getBusinessFeatures()),razorpayMode:mode,razorpayKeyId:activeKeyId,razorpayConfigured:Boolean(activeKeyId&&activeSecret),razorpaySecretConfigured:Boolean(activeSecret)},'Payment controls saved');
 }));
 r.put(['/admin/api-keys','/admin/business/settings'], ah(async(req,res)=>{
   const suppliedApiKey=String(req.body.googleMapKey||req.body.googleMapsApiKey||'').trim();
